@@ -60,6 +60,12 @@ export interface Config {
   escalateThreshold?: number
   /** Total evaluation count after escalation. */
   maxEscalateK?: number
+  /**
+   * Tiered scoring (降本4): optional stronger model used ONLY for escalation
+   * reps. Keep verifierModel on a cheap tier and spend this one only on the
+   * close-margin cases that need it. Unset = same as verifierModel.
+   */
+  escalationModel?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -76,6 +82,7 @@ export const Config: z<Config> = z.object({
   autoEscalate: z.boolean().default(true),
   escalateThreshold: z.number().default(0.15),
   maxEscalateK: z.natural().default(3),
+  escalationModel: z.string(),
 })
 
 /** Plugin root (the directory containing package.json / bridge/). */
@@ -124,6 +131,7 @@ export function apply(ctx: Context, config: Config): void {
     autoEscalate: config.autoEscalate ?? true,
     escalateThreshold: config.escalateThreshold ?? 0.15,
     maxEscalateK: config.maxEscalateK ?? 3,
+    escalationModel: config.escalationModel,
   }
   const runner = createEscalationRunner({ getBridge, store, esc: escalation, budgetMs: () => config.taskTimeoutMs ?? 1_800_000 })
 
