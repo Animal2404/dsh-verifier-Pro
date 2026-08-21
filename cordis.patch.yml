@@ -10,7 +10,7 @@
 - insert:
     - id: verifier-brain
       # Node-resolvable package name — must stay in sync with package.json `name`.
-      name: '@dsh-external/dsh-verifier-Pro'
+      name: '@dsh-external/dsh-verifier-pro'
       config:
         # Sync tool-call bridge timeout in ms.
         bridgeTimeoutMs: 300000

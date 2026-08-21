@@ -519,6 +519,10 @@ function analyzeCredentialText(text) {
       // 顶层扁平键：直接匹配已知凭据键名，并要求值像真密钥
       section = null; // 新的顶层键结束之前的嵌套节上下文
       if (KNOWN_ENV_KEYS.has(key) && looksLikeRealSecret(val)) avail.add(key);
+    } else if (section === 'refs') {
+      // DSH v1 凭据格式（审计二实证）：refs: 节下的缩进键就是用户凭据本体，
+      // 与顶层扁平键等价处理。此前该节无映射导致全部真实 key 假阴性。
+      if (KNOWN_ENV_KEYS.has(key) && looksLikeRealSecret(val)) avail.add(key);
     } else if (section) {
       // 缩进的 key/token 行落在某个已知 provider 节内 → 映射为大写凭据键
       const mapped = SECTION_TO_CRED_KEY.get(section);
