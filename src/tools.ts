@@ -15,6 +15,7 @@
  * raw instead of silently averaged.
  */
 import type { Context } from 'cordis'
+import { join } from 'node:path'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
@@ -70,6 +71,12 @@ export interface EscalationOptions {
   escalateThreshold: number
   /** Total evaluation count after escalation (3 => two extra reps). */
   maxEscalateK: number
+  /**
+   * Optional stronger model used ONLY for escalation reps (close-margin
+   * re-evaluations). Tiered scoring: keep the first pass on a cheap tier,
+   * spend the strong tier only where it matters. Unset = same as primary.
+   */
+  escalationModel?: string
 }
 
 interface CompareParams {
@@ -149,13 +156,25 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
     (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(false), deps.budgetMs())) as Record<string, unknown>
 
   const marginBefore = Math.abs(Number(k1.reward_a) - Number(k1.reward_b))
+  // exact-flat 护栏（降本3）：双侧精确 0.5 是 tie 掩蔽批量失败的特征签名。
+  const compareExactFlat = Number(k1.reward_a) === 0.5 && Number(k1.reward_b) === 0.5
   const doEscalate = deps.esc.autoEscalate
+    && !compareExactFlat
     && Number.isFinite(marginBefore)
     && marginBefore > FLAT_EPSILON
     && marginBefore <= deps.esc.escalateThreshold
 
   if (!doEscalate) {
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started })
+    if (compareExactFlat) {
+      return {
+        ...k1,
+        cached: k1WasCached,
+        escalated: false,
+        signal: 'degraded',
+        warning: '⚠️ 双侧得分精确等于 0.5 —— 这是评估失败被 on_error="tie" 掩蔽的特征，不是真实平局。建议换模型重试或人工复核。',
+      }
+    }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
     return {
       ...k1,
@@ -175,11 +194,18 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
   }
 
   // Extra reps with manual slot alternation (even reps swap, rewards swapped back).
+  // Tiered scoring (降本4): escalation reps may use a stronger model — the strong
+  // tier is only spent on close-margin cases that actually need it.
+  const repModel = deps.esc.escalationModel ?? p.model
+  const mkRepParams = (swap: boolean): Record<string, unknown> => ({
+    ...mkParams(swap),
+    ...(repModel ? { model: repModel } : {}),
+  })
   const reps: Record<string, unknown>[] = [k1]
   for (let i = 2; i <= 1 + extraReps; i++) {
     const swap = i % 2 === 0
     try {
-      let r = await (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(swap), deps.budgetMs())
+      let r = await (await deps.getBridge()).request<Record<string, unknown>>('compare', mkRepParams(swap), deps.budgetMs())
       if (swap) r = { reward_a: r.reward_b, reward_b: r.reward_a }
       reps.push(r)
     } catch (error) {
@@ -236,22 +262,42 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed })
   const started = Date.now()
+  // 官方 score cache 落盘（降本1）：跨重启/跨会话的相同 (problem,candidates,criteria,model)
+  // 组合直接命中，不重付打分费用。compare 无 cache 参数（官方 API 不支持）不受影响。
+  const selectCachePath = join(deps.store.stateDir, 'score-cache.json')
 
   const escCached = resultCache.get(baseKey + ':esc')
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
   const k1 = await cached(baseKey + ':k1', async () =>
-    (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(p.n_evaluations ?? 1), deps.budgetMs())) as Record<string, unknown>
+    (await deps.getBridge()).request<Record<string, unknown>>('select',
+      { ...mkParams(p.n_evaluations ?? 1), cache: selectCachePath }, deps.budgetMs())) as Record<string, unknown>
+
+  // exact-flat 护栏（降本3）：全分量精确 =0.5 是 on_error="tie" 掩蔽批量失败的
+  // 特征签名（调查报告 report-a/b/c 一致结论），不是真实评估。标记 degraded，
+  // 让调用方（bestofn/agent）知道这份结果不可用于排名，而不是继续为它烧钱。
+  const k1Scores = Array.isArray(k1.scores) ? k1.scores as unknown[] : []
+  const exactFlat = k1Scores.length > 0 && k1Scores.every((s) => Number(s) === 0.5)
 
   const marginBefore = topGap(k1.scores)
   const doEscalate = deps.esc.autoEscalate
+    && !exactFlat
     && Number.isFinite(marginBefore)
     && marginBefore > FLAT_EPSILON
     && marginBefore <= deps.esc.escalateThreshold
 
   if (!doEscalate) {
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started })
+    if (exactFlat) {
+      return {
+        ...k1,
+        cached: k1WasCached,
+        escalated: false,
+        signal: 'degraded',
+        warning: '⚠️ 全部候选精确等于 0.5 —— 这是评估批量失败被 on_error="tie" 掩蔽的特征（如上游 logprobs 故障），不是真实平局。本结果不可用于排名；建议换模型重试或人工复核。',
+      }
+    }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
     return {
       ...k1,
@@ -270,7 +316,10 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   let escalated: Record<string, unknown>
   try {
-    escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(3), deps.budgetMs())
+    // 分级评分（降本4）：升级重评用更强模型（若配置），强模型只花在噪声带边缘。
+    const escModel = deps.esc.escalationModel ?? p.model
+    escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select',
+      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: selectCachePath }, deps.budgetMs())
   } catch (error) {
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
@@ -449,6 +498,9 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     if (value.margin_before !== undefined) prefix += `（margin ${Number(value.margin_before).toFixed(3)} → ${Number(value.margin_after).toFixed(3)}）`
     if (typeof value.consistency === 'string') prefix += `，${value.consistency}`
     prefix += '\n'
+  }
+  if (value.signal === 'degraded') {
+    return { type: 'text', text: `⚠️ 信号不可信（degraded）：${String(value.warning ?? '全部分量精确等于 0.5，评估疑似批量失败')}。本结果不可用于排名。` }
   }
   if (value.signal === 'flat') {
     if (value.reward_a !== undefined) {

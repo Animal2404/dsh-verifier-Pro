@@ -217,6 +217,14 @@ export function registerBestOfNCommand(ctx: Context, deps: {
           ...(deps.defaultModel ? { model: deps.defaultModel } : {}),
         }) as Record<string, unknown>
 
+        // degraded（exact-flat 护栏）：全 0.5 = 批量失败被 tie 掩蔽，结果不可用于排名
+        if (selected.signal === 'degraded') {
+          return {
+            kind: 'error',
+            text: `/bestofn: 打分结果不可信 —— ${String(selected.warning ?? '全部分量精确等于 0.5，评估疑似被 on_error="tie" 掩蔽的批量失败')}。\n本次不产生排名。建议：更换评分模型重试（见 README 后端配置表），或人工复核候选。`,
+          }
+        }
+
         // unstable：不给冠军，呈现全部原始分数建议人工复核（自家 prompt 铁律）
         if (selected.signal === 'unstable') {
           const lines: string[] = []
