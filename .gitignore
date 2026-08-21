@@ -5,3 +5,4 @@ build.log
 *.tsbuildinfo
 *.tgz
 tmp_articles/
+docs/
