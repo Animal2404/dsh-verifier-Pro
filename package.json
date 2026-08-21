@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-verifier-brain",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "LLM-as-a-Verifier brain for DSH agent teams: fine-grained verification (select/compare/track/progress) via official llm-verifier Python bridge, with team best-of-N selection and reviewer quality gates",
   "type": "module",
   "main": "./lib/index.js",
@@ -9,6 +9,7 @@
     "lib",
     "bridge",
     "scripts/probe_logprobs.py",
+    "scripts/setup.mjs",
     "scripts/evidence_chain.mjs",
     "scripts/smoke.mjs",
     "scripts/describe_visual.mjs",
