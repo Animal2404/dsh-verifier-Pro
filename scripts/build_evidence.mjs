@@ -30,13 +30,28 @@ import { basename, dirname, join, resolve } from 'node:path'
 const OUT_DIR = resolve(process.argv[findArg('--out')] ?? join(process.cwd(), 'tmp_articles', 'evidence'))
 const SMOKE_DIR = process.argv[findArg('--smoke-dir')] ? resolve(process.argv[findArg('--smoke-dir')]) : undefined
 const DESCRIBE_DIR = process.argv[findArg('--describe-dir')] ? resolve(process.argv[findArg('--describe-dir')]) : undefined
-const SUMMARY = process.argv[findArg('--summary')]
 const AS_JSON = process.argv.includes('--json')
 const VALUED_ARGS = new Set(['--out', '--summary', '--smoke-dir', '--describe-dir'])
 const INPUTS = process.argv.slice(2).filter((a, i, arr) => {
   if (a.startsWith('--')) return false
   return !VALUED_ARGS.has(arr[i - 1])
 })
+
+/** 收集所有 --summary 值；支持 "name=text"（逐候选）与 "text"（全局 fallback）。 */
+function collectSummaries() {
+  const per = new Map()
+  let global
+  const argv = process.argv
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== '--summary') continue
+    const raw = argv[i + 1]
+    if (raw === undefined) continue
+    const eq = raw.indexOf('=')
+    if (eq > 0) per.set(raw.slice(0, eq).trim(), raw.slice(eq + 1))
+    else global = raw
+  }
+  return { per, global }
+}
 
 function findArg(name) {
   const i = process.argv.indexOf(name)
@@ -118,12 +133,18 @@ function buildBlock(input, summary) {
 
 async function main() {
   if (INPUTS.length === 0) {
-    console.error('usage: node scripts/build_evidence.mjs <artifactOrJson...> [--summary <text|file>] [--json]')
+    console.error('usage: node scripts/build_evidence.mjs <artifactOrJson...> [--summary <text|file> | --summary <name>=<text>]... [--json]')
     process.exit(2)
   }
-  const summary = readText(SUMMARY)
+  const { per, global } = collectSummaries()
+  const globalText = readText(global)
   mkdirSync(OUT_DIR, { recursive: true })
-  const blocks = INPUTS.map((input) => buildBlock(input, summary))
+  const blocks = INPUTS.map((input) => {
+    const name = basename(input).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+    // 逐候选 summary 优先（--summary name=text），否则全局
+    const summary = per.has(name) ? per.get(name) : globalText
+    return buildBlock(input, summary)
+  })
   if (AS_JSON) {
     console.log(JSON.stringify(blocks, null, 2))
   } else {

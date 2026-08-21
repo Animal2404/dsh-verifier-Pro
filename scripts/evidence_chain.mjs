@@ -20,7 +20,6 @@ import { readdirSync, readFileSync } from 'node:fs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUT = resolve(process.argv[findArg('--out')] ?? join(process.cwd(), 'tmp_articles', 'chain'))
-const SUMMARY = process.argv[findArg('--summary')]
 const AS_JSON = process.argv.includes('--json')
 const SKIP_DESCRIBE = process.argv.includes('--skip-describe')
 const VALUED_ARGS = new Set(['--out', '--summary'])
@@ -28,6 +27,18 @@ const INPUTS = process.argv.slice(2).filter((a, i, arr) => {
   if (a.startsWith('--')) return false
   return !VALUED_ARGS.has(arr[i - 1])
 })
+
+/** 收集所有 --summary 值（支持 "name=text" 逐候选与全局文本），原样转发给 build_evidence。 */
+function collectSummaries() {
+  const argv = process.argv
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== '--summary') continue
+    const raw = argv[i + 1]
+    if (raw !== undefined) out.push(raw)
+  }
+  return out
+}
 
 function findArg(name) {
   const i = process.argv.indexOf(name)
@@ -67,7 +78,8 @@ async function main() {
   }
 
   console.log('[3/3] build_evidence ...')
-  const summaryArgs = SUMMARY ? ['--summary', SUMMARY] : []
+  const summaries = collectSummaries()
+  const summaryArgs = summaries.flatMap((s) => ['--summary', s])
   const e = run('build_evidence.mjs', [...INPUTS, ...summaryArgs, '--smoke-dir', smokeDir, '--describe-dir', describeDir, '--out', evDir])
   console.log(e.stdout)
 
