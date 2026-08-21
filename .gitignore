@@ -1,0 +1,7 @@
+node_modules/
+lib/
+.venv/
+build.log
+*.tsbuildinfo
+*.tgz
+tmp_articles/
