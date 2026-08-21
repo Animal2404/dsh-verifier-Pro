@@ -118,6 +118,12 @@ async function main() {
     }
   }
   if (AS_JSON) console.log(JSON.stringify(results, null, 2))
+  // 关闭 undici 全局连接池，避免 Windows 上退出时的句柄清理竞态
+  // (间歇性 "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)")
+  try {
+    const dispatcher = globalThis[Symbol.for('undici.globalDispatcher.1')]
+    if (dispatcher?.close) await dispatcher.close()
+  } catch { /* best-effort */ }
   process.exit(results.length === IMAGES.length ? 0 : 1)
 }
 
