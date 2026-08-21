@@ -1,0 +1,32 @@
+# dsh-verifier-brain bundle patch: mounts the verifier-brain plugin into the
+# host composition of a dsh profile. The plugin registers its verifier_* tools
+# into the shared `tools` registry and one usage section into the global
+# system prompt, so every session can drive LLM-as-a-Verifier through natural
+# language or the AgentTeams workflow.
+#
+# Install: `dsh plugin --profile <name> add <this package>` (npm or a local
+# path). Requires the project .venv (python -m venv .venv && .venv python -m
+# pip install llm-verifier) or a system python with llm-verifier installed.
+- insert:
+    - id: verifier-brain
+      # Node-resolvable package name — must stay in sync with package.json `name`.
+      name: '@dsh-external/dsh-verifier-brain'
+      config:
+        # Sync tool-call bridge timeout in ms.
+        bridgeTimeoutMs: 300000
+        # Async verifier-task timeout in ms (long tournament scorings).
+        taskTimeoutMs: 1800000
+        # Default verifier model; per-call `model` args override.
+        # Working default: deepseek-v4-flash via opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
+        verifierModel: deepseek-v4-flash
+        # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
+        backendBaseUrl: https://opencode.ai/zen/go/v1
+        # Concurrent workers inside the Python bridge.
+        maxWorkers: 4
+        # Register the verifier usage policy into the global system prompt.
+        promptSection: true
+        # Adaptive verification scaling: auto re-evaluate (K=3) when the
+        # score margin falls in the noise band (0.03, escalateThreshold].
+        autoEscalate: true
+        escalateThreshold: 0.15
+        maxEscalateK: 3
