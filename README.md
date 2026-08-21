@@ -105,12 +105,26 @@ verifier 只做 reward 函数，不做写手；整合由代理完成——这是
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
 
+## 参考项目
+
+本项目参考了以下项目与文档（同路线先驱与协作底座）：
+
+| 项目 | 说明 |
+|---|---|
+| [llm-as-a-verifier/llm-as-a-verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) | 官方框架本体：logprob 期望 reward（select / compare / track / ProgressTracker），通过 PyPI 包 `llm-verifier` 直接复用 |
+| [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams) | 多智能体协作"躯干"（队长/成员/任务板）；集成方式：system prompt 策略段 + 服务调用，不合并不 fork |
+| [uson1x/dsh-plugin-llm-verifier](https://github.com/uson1x/dsh-plugin-llm-verifier) | 纯 Node 评分器 + `verify_rollout`（并行 N 尝试）的产品形态参考；不采用其无 logprobs 的技术路线 |
+| [lanbaolu/dsh-llm-verifier](https://github.com/lanbaolu/dsh-llm-verifier) | 同路线先驱：Python stdio 桥 + DSH 插件；吸收其桥协议与工具契约，独立重写并修其三大短板 |
+| [lanbaolu/dsh-llm-verifier docs/PROGRESS.md](https://github.com/lanbaolu/dsh-llm-verifier/blob/HEAD/docs/PROGRESS.md) | 先驱开发进度记录 |
+| [lanbaolu/dsh-llm-verifier docs/PLAN.md](https://github.com/lanbaolu/dsh-llm-verifier/blob/HEAD/docs/PLAN.md) | 先驱架构与关键决策 |
+| [lanbaolu/dsh-llm-verifier docs/ROADMAP.md](https://github.com/lanbaolu/dsh-llm-verifier/blob/HEAD/docs/ROADMAP.md) | 先驱路线图 |
+
 ## 相对参考实现的差异
 
-参考 [lanbaolu/dsh-llm-verifier](https://github.com/lanbaolu/dsh-llm-verifier)（同路线先驱），
-本项目的增量：**桥内并发**（异步任务不再串行排队）、**状态落盘**（重启不丢）、
-**Windows 一等公民**、**桥崩溃自重启**、**团队集成协议**（best-of-N / reviewer 门禁 /
-进度传感器写进 system prompt）。
+相对上述参考实现，本项目的增量：**桥内并发**（异步任务不再串行排队）、
+**状态落盘**（重启不丢）、**Windows 一等公民**、**桥崩溃自重启**、**团队集成协议**
+（best-of-N / reviewer 门禁 / 进度传感器写进 system prompt）、**自适应验证缩放**
+（分差落噪声带自动 K=3 重评并如实上报评估次数）。
 
 ## 服务化接口
 
@@ -118,12 +132,11 @@ verifier 只做 reward 函数，不做写手；整合由代理完成——这是
 `progressStart` / `progressUpdate` / `progressClose` / `usage` / `ping`），
 不必经过模型可见工具。
 
-## 文档
+## 工具脚本
 
-- [docs/PLAN.md](docs/PLAN.md) — 架构与关键决策
-- [docs/ROADMAP.md](docs/ROADMAP.md) — P0~P3 路线图与已知限制
 - `scripts/probe_logprobs.py` — 探测任意 OpenAI 兼容端点是否返回 logprobs
 - `scripts/e2e_bridge_test.py` — 桥全流程端到端测试（单进程，含 ProgressTracker）
+- `scripts/acceptance_ts.mjs` — 自适应升级十用例验收回归（ITERATION_PLAN §3）
 
 ## License
 
