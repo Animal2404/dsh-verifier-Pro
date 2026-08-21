@@ -16,11 +16,17 @@ const ROOT = join(__dirname, '..');
 const scriptPath = join(ROOT, 'bridge', 'verifier_brain_bridge.py');
 const pythonBin = join(ROOT, '.venv', 'Scripts', 'python.exe');
 
+// 安全铁律：绝不 fallback 明文密钥。无 env 时跳过在线用例（审计 P0-1）。
+if (!process.env.OPENCODE_GO_API_KEY) {
+  console.error('acceptance_test: OPENCODE_GO_API_KEY 未设置——跳过在线验收（不使用任何硬编码凭据）。');
+  process.exit(0);
+}
+
 const BRIDGE_ENV = {
   ...process.env,
   DEEPSEEK_EFFORT: 'off',
   OPENAI_BASE_URL: 'https://opencode.ai/zen/go/v1',
-  OPENAI_API_KEY: process.env.OPENCODE_GO_API_KEY || '***REDACTED***',
+  OPENAI_API_KEY: process.env.OPENCODE_GO_API_KEY,
   VERIFIER_BRAIN_WORKERS: '4',
 };
 

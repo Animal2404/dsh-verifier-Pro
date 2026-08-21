@@ -109,8 +109,15 @@ async function cdpConnect(port) {
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
   let seq = 0
   const pending = new Map()
+  // 收集运行时异常（含异步 setTimeout/rAF 回调里的错误——审计 P0-3）
+  const collectedExceptions = []
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data)
+    if (msg.method === 'Runtime.exceptionThrown') {
+      const d = msg.params?.exceptionDetails
+      const text = d?.exception?.description || d?.text || 'unknown exception'
+      collectedExceptions.push(text.slice(0, 200))
+    }
     if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id) }
   }
   const send = (method, params = {}) => new Promise((resolve) => {
@@ -125,38 +132,63 @@ async function cdpConnect(port) {
   await send('Page.enable')
   await send('Runtime.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 960, height: 540, deviceScaleFactor: 1, mobile: false })
-  return { send, evalJs, close: () => { try { ws.close() } catch {} } }
+  return { send, evalJs, collectedExceptions, close: () => { try { ws.close() } catch {} } }
 }
 
 // ---------- HTML 冒烟 ----------
+/** 每个新文档创建时注入的错误采集器（导航不会丢失——审计 P0-3 修复）。 */
+const ERR_COLLECTOR = `
+window.__errs = [];
+window.addEventListener('error', e => window.__errs.push(String(e.message)));
+window.addEventListener('unhandledrejection', e => window.__errs.push('unhandledrejection: ' + String(e.reason)));
+'ok'`
+
 async function smokeHtml(cdp, file, outDir) {
   const name = basename(file).replace(/\.[^.]+$/, '')
   const fileUrl = 'file:///' + resolve(file).replace(/\\/g, '/')
-  await cdp.evalJs(`window.__errs = []; window.addEventListener('error', e => window.__errs.push(String(e.message))); 'ok'`)
+  // 清空上一候选的异常残留，避免会话级收集器跨候选串扰
+  cdp.collectedExceptions.length = 0
+  // addScriptToEvaluateOnNewDocument：每个新文档加载前自动执行，导航后依然有效
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ERR_COLLECTOR })
   await cdp.send('Page.navigate', { url: fileUrl })
   await new Promise(r => setTimeout(r, WAIT_MS))
   const result = await cdp.evalJs(`
     (function(){
       try {
+        const hasUpdate = typeof update === 'function';
         if (typeof startGame === 'function') startGame();
         else if (typeof window.start === 'function') window.start();
         else if (typeof window.init === 'function') window.init();
         let errs = [];
+        let ticksRun = 0;
         for (let i = 0; i < ${TICKS}; i++) {
-          try { if (typeof update === 'function') update(); else break; }
+          try { if (hasUpdate) { update(); ticksRun++ } else break; }
           catch (e) { errs.push(String(e.message) + ' @' + i); break; }
         }
         if (typeof draw === 'function') { try { draw(); } catch (e) { errs.push('draw: ' + e.message); } }
         let state = null
         try { state = (typeof state !== 'undefined') ? state : null } catch {}
         const p = (typeof player !== 'undefined' && player) ? { x: Math.round(player.x), y: Math.round(player.y) } : null
-        return JSON.stringify({ ticksDone: errs.length === 0, errors: errs.slice(0, 5), globalErrs: (window.__errs || []).slice(0, 5), state, player: p })
+        return JSON.stringify({ hasUpdate, ticksRun, errors: errs.slice(0, 5), globalErrs: (window.__errs || []).slice(0, 5), state, player: p })
       } catch (e) { return JSON.stringify({ fatal: String(e.message) }) }
     })()
   `)
   let parsed
   try { parsed = JSON.parse(result) } catch { parsed = { raw: result } }
-  const errors = [...(parsed.errors || []), ...(parsed.globalErrs || []), ...(parsed.fatal ? [parsed.fatal] : [])]
+  // globalErrs 现在来自新文档的监听器（真实页面错误）+ CDP exceptionThrown 事件
+  const errors = [...(parsed.errors || []), ...(parsed.globalErrs || []), ...(parsed.fatal ? [parsed.fatal] : []), ...cdp.collectedExceptions]
+  // 无 update 函数的静态页：探针无法驱动行为，显式标记 unknown 而非静默 ok:true（审计 P0-3）
+  const probeable = parsed.hasUpdate === true
+  if (!probeable && errors.length === 0) {
+    return {
+      file, kind: 'html', ok: true,
+      note: 'probe-skip: 页面无可驱动的 update() 探针，仅验证加载无错+截图；行为正确性未测',
+      probeSkipped: true,
+      errors, screenshot: null,
+      state: parsed.state ?? null, player: parsed.player ?? null,
+      ticksDone: false,
+    }
+  }
   const screenshot = join(outDir, `${name}.png`)
   try {
     const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
@@ -166,7 +198,7 @@ async function smokeHtml(cdp, file, outDir) {
     file, kind: 'html', ok: errors.length === 0, errors,
     screenshot: existsSync(screenshot) ? screenshot : null,
     state: parsed.state ?? null, player: parsed.player ?? null,
-    ticksDone: parsed.ticksDone ?? null,
+    ticksDone: parsed.ticksRun > 0 ? true : null,
   }
 }
 

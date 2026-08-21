@@ -146,7 +146,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
   const k1 = await cached(baseKey + ':k1', async () =>
-    (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(false))) as Record<string, unknown>
+    (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(false), deps.budgetMs())) as Record<string, unknown>
 
   const marginBefore = Math.abs(Number(k1.reward_a) - Number(k1.reward_b))
   const doEscalate = deps.esc.autoEscalate
@@ -179,7 +179,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
   for (let i = 2; i <= 1 + extraReps; i++) {
     const swap = i % 2 === 0
     try {
-      let r = await (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(swap))
+      let r = await (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(swap), deps.budgetMs())
       if (swap) r = { reward_a: r.reward_b, reward_b: r.reward_a }
       reps.push(r)
     } catch (error) {
@@ -242,7 +242,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
   const k1 = await cached(baseKey + ':k1', async () =>
-    (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(p.n_evaluations ?? 1))) as Record<string, unknown>
+    (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(p.n_evaluations ?? 1), deps.budgetMs())) as Record<string, unknown>
 
   const marginBefore = topGap(k1.scores)
   const doEscalate = deps.esc.autoEscalate
@@ -270,7 +270,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   let escalated: Record<string, unknown>
   try {
-    escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(3))
+    escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select', mkParams(3), deps.budgetMs())
   } catch (error) {
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
