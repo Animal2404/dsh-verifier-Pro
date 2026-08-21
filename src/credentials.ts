@@ -27,10 +27,17 @@ const ALIASES: Array<{ from: string; to: string; baseUrl?: string }> = [
   },
 ]
 
-/** Parse a flat `KEY: value` yaml (values may be quoted); returns raw key->value. */
+/**
+ * Parse credential keys from DSH's `.credentials.yaml`. Tolerates BOTH known
+ * formats (审计二修正): the legacy flat `KEY: value` layout AND the current
+ * `version: 1` + `refs:` nested layout where keys sit indented under the refs
+ * node. Skips comments and continuation lines; values may be quoted.
+ */
 function parseFlatYaml(text: string): Map<string, string> {
   const map = new Map<string, string>()
-  for (const line of text.split(/\r?\n/)) {
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
     const match = /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(line)
     if (!match) continue
     let value = match[2].trim()

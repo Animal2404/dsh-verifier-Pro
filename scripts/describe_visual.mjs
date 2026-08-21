@@ -46,8 +46,9 @@ function apiKey() {
   if (process.env[API_KEY_ENV]) return process.env[API_KEY_ENV]
   try {
     const text = readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
-    const m = text.split(/\r?\n/).find((l) => l.startsWith(API_KEY_ENV + ':'))
-    if (m) return m.slice(API_KEY_ENV.length + 1).trim().replace(/^["']|["']$/g, '')
+    // trim 后匹配：兼容 DSH v1 refs: 节下缩进键（审计二修正——此前锚定行首假阴性）
+    const m = text.split(/\r?\n/).find((l) => l.trim() === API_KEY_ENV + ':' + '' || l.trim().startsWith(API_KEY_ENV + ':'))
+    if (m) return m.trim().slice(API_KEY_ENV.length + 1).trim().replace(/^["']|["']$/g, '')
   } catch { /* best-effort */ }
   return undefined
 }

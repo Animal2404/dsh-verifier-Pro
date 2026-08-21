@@ -16,6 +16,8 @@
  */
 import type { Context } from 'cordis'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { existsSync, unlinkSync } from 'node:fs'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
@@ -262,9 +264,14 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed })
   const started = Date.now()
-  // 官方 score cache 落盘（降本1）：跨重启/跨会话的相同 (problem,candidates,criteria,model)
-  // 组合直接命中，不重付打分费用。compare 无 cache 参数（官方 API 不支持）不受影响。
-  const selectCachePath = join(deps.store.stateDir, 'score-cache.json')
+  // 官方 score cache（降本1，第二轮审计修正）：官方 cache_key = crit|task|索引|rep，
+  // 不含 problem/候选内容/model —— 全局持久化会造成跨任务投毒（audit2 report-b 实证）。
+  // 修正：cache 文件改为【每次调用独立临时文件】——只保留单次锦标赛内
+  // warm-up/fan-out 的复用收益，绝不跨任务。供应商前缀缓存已覆盖跨运行节省。
+  const selectCachePath = join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+  try {
+    if (existsSync(selectCachePath)) unlinkSync(selectCachePath)
+  } catch { /* best-effort */ }
 
   const escCached = resultCache.get(baseKey + ':esc')
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
@@ -274,11 +281,13 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
     (await deps.getBridge()).request<Record<string, unknown>>('select',
       { ...mkParams(p.n_evaluations ?? 1), cache: selectCachePath }, deps.budgetMs())) as Record<string, unknown>
 
-  // exact-flat 护栏（降本3）：全分量精确 =0.5 是 on_error="tie" 掩蔽批量失败的
-  // 特征签名（调查报告 report-a/b/c 一致结论），不是真实评估。标记 degraded，
-  // 让调用方（bestofn/agent）知道这份结果不可用于排名，而不是继续为它烧钱。
+  // exact-flat 护栏（降本3，审计二修正版）：全分量精确 =0.5 有两种成因——
+  //   a) on_error="tie" 掩蔽批量失败（候选互不相同 → 可疑 → degraded）
+  //   b) 候选完全相同时的对称真实打分（合法 flat，验收用例 #3 场景）
+  // 用候选串是否相同来区分，避免误伤真实平局（解决与验收 #3 的逻辑冲突）。
   const k1Scores = Array.isArray(k1.scores) ? k1.scores as unknown[] : []
-  const exactFlat = k1Scores.length > 0 && k1Scores.every((s) => Number(s) === 0.5)
+  const identicalCandidates = new Set(p.candidates.map((c) => String(c))).size === 1
+  const exactFlat = !identicalCandidates && k1Scores.length > 0 && k1Scores.every((s) => Number(s) === 0.5)
 
   const marginBefore = topGap(k1.scores)
   const doEscalate = deps.esc.autoEscalate
@@ -316,10 +325,14 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
 
   let escalated: Record<string, unknown>
   try {
-    // 分级评分（降本4）：升级重评用更强模型（若配置），强模型只花在噪声带边缘。
+    // 分级评分（降本4，审计二修正）：升级用更强模型时，cache 文件按模型隔离——
+    // 官方 cache_key 不含 model，共用文件会让升级 rep-0 命中首评模型的缓存分数。
     const escModel = deps.esc.escalationModel ?? p.model
+    const escCachePath = escModel === p.model
+      ? selectCachePath
+      : join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
     escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select',
-      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: selectCachePath }, deps.budgetMs())
+      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, deps.budgetMs())
   } catch (error) {
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
@@ -335,10 +348,13 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
     }
   }
 
-  // Same winner: average scores element-wise when shapes match.
+  // Same winner: average scores element-wise when shapes match — but ONLY when
+  // first pass and escalation used the SAME model (审计二修正：跨模型条件期望
+  // 不可平均)。Tiered scoring 时以强模型的升级结果为准，不与首评混合。
+  const tiered = Boolean(deps.esc.escalationModel) && deps.esc.escalationModel !== p.model
   const s1 = Array.isArray(k1.scores) ? k1.scores as number[] : []
   const s3 = Array.isArray(escalated.scores) ? escalated.scores as number[] : []
-  const averaged = (s1.length === s3.length && s1.every((v) => typeof v === 'number'))
+  const averaged = (!tiered && s1.length === s3.length && s1.every((v) => typeof v === 'number'))
     ? s3.map((v, i) => (v + Number(s1[i])) / 2)
     : s3
   const marginAfter = topGap(averaged)
@@ -347,6 +363,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
     scores: averaged,
     escalated: true,
     k_used: 3,
+    ...(tiered ? { escalation_model: deps.esc.escalationModel, note: '分级评分：升级结果来自更强模型，未与首评平均' } : {}),
     margin_before: marginBefore,
     margin_after: marginAfter,
     consistency: 'top1 一致',

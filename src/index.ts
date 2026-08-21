@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-verifier-Pro 鈥?LLM-as-a-Verifier brain for DSH.
+ * @dsh-external/dsh-verifier-pro 鈥?LLM-as-a-Verifier brain for DSH.
  *
  * Exposes the official llm-verifier framework (fine-grained logprob rewards:
  * select / compare / track / ProgressTracker) as DSH agent tools through a
@@ -30,7 +30,7 @@ import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
 import { registerBestOfNCommand } from './bestofn.js'
 
-export const name = '@dsh-external/dsh-verifier-Pro'
+export const name = '@dsh-external/dsh-verifier-pro'
 export const inject = ['tools', 'systemPrompt']
 
 export interface Config {
