@@ -9,6 +9,11 @@
     "lib",
     "bridge",
     "scripts/probe_logprobs.py",
+    "scripts/evidence_chain.mjs",
+    "scripts/smoke.mjs",
+    "scripts/describe_visual.mjs",
+    "scripts/build_evidence.mjs",
+    "scripts/bestofn-usage.cjs",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

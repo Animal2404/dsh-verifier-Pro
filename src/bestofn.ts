@@ -172,7 +172,8 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         }
       }
 
-      const outDir = join(deps.store.stateDir, 'bestofn')
+      // 每次运行独立子目录：防同名候选覆盖与陈旧证据背书（审计 P1-2/P1-4）
+      const outDir = join(deps.store.stateDir, 'bestofn', new Date().toISOString().replace(/[:.]/g, '-'))
       // 1) 证据链（冒烟→视觉→拼接）
       const chain = await runEvidenceChain(artifacts, summaries, outDir)
       const blocks = readEvidence(outDir)
@@ -215,6 +216,23 @@ export function registerBestOfNCommand(ctx: Context, deps: {
           },
           ...(deps.defaultModel ? { model: deps.defaultModel } : {}),
         }) as Record<string, unknown>
+
+        // unstable：不给冠军，呈现全部原始分数建议人工复核（自家 prompt 铁律）
+        if (selected.signal === 'unstable') {
+          const lines: string[] = []
+          lines.push(`## /bestofn 优选报告 — ⚠️ 信号不稳定`)
+          if (crashed.length) lines.push(`\n❌ 崩溃出局: ${crashed.map((c) => c.name).join(', ')}`)
+          lines.push(`\n多次评估胜者不一致，本次不产生冠军。全部原始评估如下，请人工复核：`)
+          const reps = Array.isArray(selected.reps) ? selected.reps as Array<Record<string, unknown>> : []
+          reps.forEach((r, i) => {
+            lines.push(`  第${i + 1}次: reward_a=${r.reward_a} reward_b=${r.reward_b}`)
+          })
+          if (selected.initial || selected.escalated_result) {
+            lines.push(`  首评: ${JSON.stringify(selected.initial)}`)
+            lines.push(`  升级评: ${JSON.stringify(selected.escalated_result)}`)
+          }
+          return { kind: 'success', text: lines.join('\n') }
+        }
 
         const index = Number(selected.index ?? 0)
         const scores = Array.isArray(selected.scores) ? selected.scores as number[] : []

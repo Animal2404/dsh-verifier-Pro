@@ -19,7 +19,12 @@ const ROOT = join(__dirname, '..');
 
 const scriptPath = join(ROOT, 'bridge', 'verifier_brain_bridge.py');
 const pythonBin = join(ROOT, '.venv', 'Scripts', 'python.exe');
-const API_KEY = process.env.OPENCODE_GO_API_KEY || 'sk-kRySvBNDAjzy07w89uIztvzjZfPsodYxYjzrmXF8w5nUbZQKNySgLTwzl0GGb407';
+// 安全铁律：绝不 fallback 明文密钥。无 env 时跳过在线用例（审计 P0-1）。
+const API_KEY = process.env.OPENCODE_GO_API_KEY;
+if (!API_KEY) {
+  console.error('acceptance_ts: OPENCODE_GO_API_KEY 未设置——跳过在线验收（不使用任何硬编码凭据）。');
+  process.exit(0);
+}
 
 const env = {
   ...process.env,
