@@ -75,6 +75,42 @@ bash scripts/build.sh
 
 verifier 只做 reward 函数，不做写手；整合由代理完成——这是刻意的设计边界，避免过度工程化。
 
+### /bestofn 一键命令（团队 Best-of-N 优选）
+
+一条命令跑完整"优中选优"闭环——派 N 个成员完整实现同一任务，证据链淘汰崩溃候选，
+verifier select 细粒度优选，整合合并，compare 门禁：
+
+```
+/bestofn <goal> [N]                        # 团队模式：派 N 成员完整实现 → 证据链 → select → 合并 → 门禁
+/bestofn <goal> -n 5                        # 指定成员数
+/bestofn --local <c1> <c2> ... [--summary]  # 本地模式：对已有候选跑证据链 → select → 报告
+```
+
+- 团队模式：命令激活后你（队长）按 7 步协议执行——派 N 成员（每个**完整实现**，禁止分工切面）→
+  收集产物 → 每份跑证据链（崩溃出局）→ 幸存者 select → 整合合并 → compare 门禁 → 交付分数报告。
+- 本地模式：对工作区已有的 HTML/JS 候选直接跑证据链 → select，适合快速对比手头方案。
+- select 触发自适应 K 升级时，报告会附 `escalated / k_used / margin_before / margin_after`；
+  出现 `signal:"flat"` 时排名无信号，必须用 compare 复核前二名。
+
+### 证据链自动化（M3）
+
+可运行产物在进 verifier 评分前先过证据链——**证据先行，崩溃出局**：
+
+```sh
+# 一键端到端：冒烟（HTML/CDP 或 Node.js）→ 五维视觉描述 → 证据拼接（带来源标注）
+node scripts/evidence_chain.mjs <artifactOrDir...> --summary <name>=<自述>
+
+# 分步执行
+node scripts/smoke.mjs <artifactOrDir...>            # 冒烟：错误/退出码/stdout/stderr/截图
+node scripts/describe_visual.mjs <screenshot.png>    # 五维视觉描述（色彩/氛围/细节密度/风格化/第一印象）
+node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选自述" vs "运行时观察（非候选自述）"
+```
+
+- 支持的产物类型（评审收窄）：**HTML**（CDP 开屏 + 控制台错误 + N 帧 update + 截图）与
+  **Node.js**（child_process + 退出码 + stdout/stderr）；其余标记为实验性。
+- 崩溃候选（smoke `ok:false`）**直接出局，不参与评分**——verifier 只消费带证据的幸存者。
+- 证据块明确区分"功能摘要（候选自述）"与"运行时/视觉观察（非候选自述）"，防止自述污染评分。
+
 ### 实战调用纪律（首轮真实使用沉淀）
 
 - 同步工具共享 300s 预算；3+ 候选 / 大载荷一律走 verifier task_start（异步任务独立 30min 预算），并先压缩载荷（去注释、留主干）。
@@ -124,7 +160,9 @@ verifier 只做 reward 函数，不做写手；整合由代理完成——这是
 相对上述参考实现，本项目的增量：**桥内并发**（异步任务不再串行排队）、
 **状态落盘**（重启不丢）、**Windows 一等公民**、**桥崩溃自重启**、**团队集成协议**
 （best-of-N / reviewer 门禁 / 进度传感器写进 system prompt）、**自适应验证缩放**
-（分差落噪声带自动 K=3 重评并如实上报评估次数）。
+（分差落噪声带自动 K=3 重评并如实上报评估次数）、**证据链自动化**
+（冒烟+视觉描述+来源标注，崩溃候选出局）、**/bestofn 一键优选命令**
+（团队 fan-out 或本地候选，完整"选优→合成→验证→门禁"闭环）。
 
 ## 服务化接口
 
@@ -137,6 +175,11 @@ verifier 只做 reward 函数，不做写手；整合由代理完成——这是
 - `scripts/probe_logprobs.py` — 探测任意 OpenAI 兼容端点是否返回 logprobs
 - `scripts/e2e_bridge_test.py` — 桥全流程端到端测试（单进程，含 ProgressTracker）
 - `scripts/acceptance_ts.mjs` — 自适应升级十用例验收回归（ITERATION_PLAN §3）
+- `scripts/evidence_chain.mjs` — 证据链一键端到端（冒烟→视觉描述→证据拼接）
+- `scripts/smoke.mjs` — 泛化冒烟（HTML/CDP 与 Node.js 两类）
+- `scripts/describe_visual.mjs` — 五维视觉描述（色彩/氛围/细节密度/风格化/第一印象）
+- `scripts/build_evidence.mjs` — 证据拼接（"候选自述" vs "非候选自述"来源标注）
+- `scripts/test_bestofn.mjs` — /bestofn 命令双模式验证
 
 ## License
 
