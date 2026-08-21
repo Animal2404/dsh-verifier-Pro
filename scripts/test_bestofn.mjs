@@ -65,16 +65,16 @@ async function run(input) {
   return result
 }
 
-// 测试1: 团队模式用法错误（无 goal）
+// 测试1: 空输入 → 简短引导
 await run('')
 
-// 测试1b: 团队模式正常 → followup 激活
+// 测试1b: 团队模式（智能检测：纯文字 = 目标）→ followup 激活
 await run('实现一个贪吃蛇游戏 4')
 
-// 测试2: 本地模式崩溃出局
-await run(`--local scripts/__fixtures__/good.html scripts/__fixtures__/broken.html --summary good=完整游戏实现 --summary broken=有崩溃的游戏 --quick`)
+// 测试2: 本地模式（智能检测：真实文件路径 → 自动本地，无需 --local）
+await run(`scripts/__fixtures__/good.html scripts/__fixtures__/broken.html --summary good=完整游戏实现 --summary broken=有崩溃的游戏 --quick`)
 
 // 测试3: 本地模式 select 优选（两个都存活）
-await run(`--local scripts/__fixtures__/good.html scripts/__fixtures__/other.html --summary good=完整游戏实现绿色背景 --summary other=变体游戏实现蓝色方块 --quick`)
+await run(`scripts/__fixtures__/good.html scripts/__fixtures__/other.html --summary good=完整游戏实现绿色背景 --summary other=变体游戏实现蓝色方块 --quick`)
 
 bridge.close()

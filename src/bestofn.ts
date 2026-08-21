@@ -72,15 +72,13 @@ function smokeOk(outDir: string, name: string): boolean | undefined {
   }
 }
 
-function parseArgs(rawInput: string): { artifacts: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; goal: string; n: number } {
+function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; n: number } {
   const tokens = rawInput.trim().split(/\s+/).filter(Boolean)
-  const artifacts: string[] = []
+  const positionals: string[] = []
   const summaries = new Map<string, string>()
   let quick = false
   let local = false
-  let goal = ''
   let n = 3
-  const goalTokens: string[] = []
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]
     if (tok === '--quick') { quick = true; continue }
@@ -100,11 +98,14 @@ function parseArgs(rawInput: string): { artifacts: string[]; summaries: Map<stri
       i++
       continue
     }
-    if (local) { artifacts.push(tok); continue }
-    goalTokens.push(tok)
+    // 尾部 [N]：团队模式允许 "goal... N" 形式——纯数字的最后一个 positional 当 N
+    if (i === tokens.length - 1 && /^\d+$/.test(tok) && !local && positionals.length > 0) {
+      const val = Number(tok)
+      if (val > 0) { n = Math.floor(val); continue }
+    }
+    positionals.push(tok)
   }
-  goal = goalTokens.join(' ').trim()
-  return { artifacts, summaries, quick, local, goal, n }
+  return { positionals, summaries, quick, local, n }
 }
 
 /** Build the follow-up activation directive that starts the team fan-out protocol. */
@@ -124,7 +125,7 @@ export function buildBestOfNActivation(goal: string, n: number): string {
   ].join('\n')
 }
 
-/** M4-B/M4-A command handler: team fan-out (default) or local sync loop (--local). */
+/** M4 command handler: mode is auto-detected (files → local, text → team). */
 export function registerBestOfNCommand(ctx: Context, deps: {
   getBridge: () => Promise<PythonBridge>
   store: VerifierStore
@@ -133,19 +134,26 @@ export function registerBestOfNCommand(ctx: Context, deps: {
 }): void {
   ctx.effect(() => ctx.commands.register({
     name: 'bestofn',
-    description: 'Best-of-N optimal selection: team fan-out (N members implement the goal) then evidence chain, verifier select, merge and gate',
-    input: { hint: '<goal> [N] [--local <candidate1> <candidate2> ...] [--quick]' },
+    description: 'Best-of-N optimal selection: give a goal (spawns N members, evidence chain, select, merge and gate) or file paths (scores existing artifacts)',
+    input: { hint: '<goal> [N]   |   <file1> <file2> ...   |   --quick' },
     async handler(invocation) {
-      const { artifacts, summaries, quick, local, goal, n } = parseArgs(invocation.rawInput)
+      const { positionals, summaries, quick, local: explicitLocal, n } = parseArgs(invocation.rawInput)
 
-      // 团队模式（默认）：followup 激活指令，让模型作为队长跑完整优选协议
-      if (!local) {
-        if (goal === '') {
-          return {
-            kind: 'error',
-            text: 'Usage: /bestofn <goal> [N]   — spawns N members implementing the goal, then evidence-select-merge-gate.\nUse /bestofn --local <candidate1> <candidate2> ... for local artifacts.',
-          }
+      // 智能模式判定：全部 positional 是存在的文件（≥2 个）→ 本地对比；否则视为目标文字
+      const local = explicitLocal || (positionals.length >= 2 && positionals.every((p) => existsSync(resolve(p))))
+      const artifacts = local ? positionals : []
+      const goal = local ? '' : positionals.join(' ')
+
+      // 空输入：简短引导（一键命令不该甩一大段 usage）
+      if (!local && goal === '') {
+        return {
+          kind: 'error',
+          text: '/bestofn 需要一个目标，例如：/bestofn 写一个贪吃蛇游戏 3\n（或给出至少两个已存在的文件路径来对比它们）',
         }
+      }
+
+      // 团队模式：followup 激活指令，让模型作为队长跑完整优选协议
+      if (!local) {
         invocation.agent.followup(createUserMessage({
           content: [{ type: 'text', text: buildBestOfNActivation(goal, n) }],
           source: { kind: 'user' },
@@ -156,11 +164,11 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         }
       }
 
-      // 本地同步模式（--local）：证据链 → 崩溃出局 → select → 报告
+      // 本地模式：证据链 → 崩溃出局 → select → 报告
       if (artifacts.length < 2) {
         return {
           kind: 'error',
-          text: 'Usage: /bestofn --local <candidate1> <candidate2> ... [--summary name=text]... [--quick]',
+          text: '本地对比需要至少两个候选文件，例如：/bestofn a.html b.html',
         }
       }
 
