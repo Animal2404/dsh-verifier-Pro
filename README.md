@@ -65,17 +65,23 @@ bash scripts/build.sh
 
 ### 评分后端配置（重要！）
 
-默认配置里的 `verifierModel: deepseek-v4-flash` + `backendBaseUrl: https://opencode.ai/zen/go/v1`
-是**作者的环境**——你需要按自己持有的凭据修改 `cordis.patch.yml` 的这两行：
+默认配置里的评分模型/端点是**作者的环境**——你需要按自己持有的凭据修改
+`cordis.patch.yml` 的 `verifierModel` / `backendBaseUrl` 两行：
 
-| 你有的凭据 | verifierModel | backendBaseUrl |
-|---|---|---|
-| `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` |
-| `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash` | `https://opencode.ai/zen/go/v1` |
-| `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` |
+| 你有的凭据 | verifierModel | backendBaseUrl | 实测状态 |
+|---|---|---|---|
+| `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` | ✅ 推荐 |
+| `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-pro` | `https://opencode.ai/zen/go/v1` | ⚠️ flash 已被禁 |
+| `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
+
+> ⚠️ **2026-08-22 起勿用 opencode 的 `deepseek-v4-flash` 打分**：上游为该模型启用了
+> DFLASH 投机解码，拒绝一切 logprob 请求（400 "does not support return_logprob"）。
+> 普通对话不受影响，但 verifier 打分必需 logprobs。同端点实测可用替代：
+> `deepseek-v4-pro`、`qwen3.8-max`。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
-`node scripts/probe_logprobs.py <model>` 可验证你的端点是否返回 logprobs。
+`node scripts/probe_logprobs.py <model>` 可验证你的端点是否返回 logprobs；
+或用 `node .venv/Scripts/python scripts/scan_logprob_models.py <你的key>` 批量扫描候选模型。
 
 ## 使用
 
