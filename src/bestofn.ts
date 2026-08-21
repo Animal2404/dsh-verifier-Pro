@@ -19,6 +19,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
 import type {} from '@deepseek-ai/dsh-commands'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
 import type { EscalationDeps } from './tools.js'
@@ -71,14 +72,19 @@ function smokeOk(outDir: string, name: string): boolean | undefined {
   }
 }
 
-function parseArgs(rawInput: string): { artifacts: string[]; summaries: Map<string, string>; quick: boolean } {
+function parseArgs(rawInput: string): { artifacts: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; goal: string; n: number } {
   const tokens = rawInput.trim().split(/\s+/).filter(Boolean)
   const artifacts: string[] = []
   const summaries = new Map<string, string>()
   let quick = false
+  let local = false
+  let goal = ''
+  let n = 3
+  const goalTokens: string[] = []
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]
     if (tok === '--quick') { quick = true; continue }
+    if (tok === '--local') { local = true; continue }
     if (tok === '--summary') {
       const pair = tokens[i + 1]
       if (pair && pair.includes('=')) {
@@ -88,12 +94,37 @@ function parseArgs(rawInput: string): { artifacts: string[]; summaries: Map<stri
       }
       continue
     }
-    artifacts.push(tok)
+    if (tok === '-n' || tok === '--n') {
+      const val = Number(tokens[i + 1])
+      if (Number.isFinite(val) && val > 0) n = Math.floor(val)
+      i++
+      continue
+    }
+    if (local) { artifacts.push(tok); continue }
+    goalTokens.push(tok)
   }
-  return { artifacts, summaries, quick }
+  goal = goalTokens.join(' ').trim()
+  return { artifacts, summaries, quick, local, goal, n }
 }
 
-/** M4-B command handler: evidence chain → crash-out → select → report. */
+/** Build the follow-up activation directive that starts the team fan-out protocol. */
+export function buildBestOfNActivation(goal: string, n: number): string {
+  return [
+    'The user invoked the `/bestofn` command. Activate the Best-of-N optimal-selection protocol from your instructions now: you are the captain of a multi-agent team.',
+    `Goal: ${goal}`,
+    `Candidate count: ${n} (spawn exactly ${n} members, each delivering a COMPLETE independent implementation of the goal — never split the task into aspects per member).`,
+    '',
+    'Run the full loop:',
+    '1. agent_teams: create team, add N members, assign each the SAME task (complete implementation).',
+    '2. Collect N artifacts (each member saves its deliverable to a path).',
+    '3. Evidence chain per artifact: `node scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot.',
+    '4. Survivor evidence blocks -> verifier select (adaptive K handles close margins).',
+    '5. Integrate: hand ALL survivors + scores to an integrator agent to merge the best parts -> merge smoke -> verifier compare(merged, champion) gate.',
+    '6. Deliver the final result + the full score report (never fabricate or round away scores).',
+  ].join('\n')
+}
+
+/** M4-B/M4-A command handler: team fan-out (default) or local sync loop (--local). */
 export function registerBestOfNCommand(ctx: Context, deps: {
   getBridge: () => Promise<PythonBridge>
   store: VerifierStore
@@ -102,14 +133,34 @@ export function registerBestOfNCommand(ctx: Context, deps: {
 }): void {
   ctx.effect(() => ctx.commands.register({
     name: 'bestofn',
-    description: 'run the evidence-then-select Best-of-N loop over local candidate artifacts',
-    input: { hint: '<candidate1> <candidate2> ... [--summary name=text]... [--quick]' },
+    description: 'Best-of-N optimal selection: team fan-out (N members implement the goal) then evidence chain, verifier select, merge and gate',
+    input: { hint: '<goal> [N] [--local <candidate1> <candidate2> ...] [--quick]' },
     async handler(invocation) {
-      const { artifacts, summaries, quick } = parseArgs(invocation.rawInput)
+      const { artifacts, summaries, quick, local, goal, n } = parseArgs(invocation.rawInput)
+
+      // 团队模式（默认）：followup 激活指令，让模型作为队长跑完整优选协议
+      if (!local) {
+        if (goal === '') {
+          return {
+            kind: 'error',
+            text: 'Usage: /bestofn <goal> [N]   — spawns N members implementing the goal, then evidence-select-merge-gate.\nUse /bestofn --local <candidate1> <candidate2> ... for local artifacts.',
+          }
+        }
+        invocation.agent.followup(createUserMessage({
+          content: [{ type: 'text', text: buildBestOfNActivation(goal, n) }],
+          source: { kind: 'user' },
+        }))
+        return {
+          kind: 'success',
+          text: `/bestofn activated — the captain will spawn ${n} members implementing: ${goal}`,
+        }
+      }
+
+      // 本地同步模式（--local）：证据链 → 崩溃出局 → select → 报告
       if (artifacts.length < 2) {
         return {
           kind: 'error',
-          text: 'Usage: /bestofn <candidate1> <candidate2> ... [--summary name=text]... [--quick]',
+          text: 'Usage: /bestofn --local <candidate1> <candidate2> ... [--summary name=text]... [--quick]',
         }
       }
 

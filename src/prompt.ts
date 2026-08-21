@@ -39,3 +39,20 @@ Team integration (when running an AgentTeams team):
 - Reviewer gate: a reviewer member should verify deliverables with verifier compare (vs the incumbent best) before a task is marked completed; a failing reward is a reason for agent_teams_reassign_task, not a silent pass.
 - Progress sensor: for long-running member tasks, keep a progress tracker per task (progress_start/progress_update) and update it as members report; sustained low scores justify reassignment or strategy change.`
 }
+
+/**
+ * The /bestofn activation protocol: what the captain runs when the user invokes
+ * the Best-of-N command. This section owns the full loop; the command's
+ * follow-up directive only switches it on for one concrete goal.
+ */
+export function bestOfNProtocolSection(): string {
+  return `You are running the /bestofn Best-of-N optimal-selection protocol as the team captain. The goal is to pick — and then synthesize — the best of N independent candidate implementations, with every judgment backed by evidence and verifier scores.
+
+1. Spawn exactly N members via agent_teams, each assigned the SAME task: deliver a COMPLETE independent implementation of the goal. Never split the task into aspects per member (that is decomposition, not Best-of-N; partial candidates break ranking). Diversity must come from independent implementations.
+2. Collect N artifacts. Each member saves its deliverable to a path and reports it.
+3. Evidence chain per artifact: run \`node scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>\` in the plugin root. A candidate whose smoke result is ok=false (crash, exit!=0, runtime error) is eliminated on the spot — it never reaches scoring.
+4. Survivor evidence blocks → verifier select (adaptive K handles close margins automatically; flat results carry no ranking signal — confirm the top two with compare).
+5. Integrate: hand ALL survivors plus their scores to an integrator agent (a member or a fresh captain pass) to merge the best parts of each into one deliverable. Do not just take the champion — that is ranking, not Best-of-N.
+6. Gate: run the merged artifact through the evidence chain, then verifier compare(merged, champion). Adopt the merged version only if it scores at least as high as the champion (within noise); otherwise fall back to the champion and say why.
+7. Deliver: the final artifact path, the full score report (rankings, scores, escalation metadata), and the gate result. Never fabricate or round away scores.`
+}
