@@ -28,6 +28,7 @@ import { VerifierStore } from './persist.js'
 import { verifierUsageSection } from './prompt.js'
 import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
+import { registerBestOfNCommand } from './bestofn.js'
 
 export const name = '@dsh-external/dsh-verifier-brain'
 export const inject = ['tools', 'systemPrompt']
@@ -139,6 +140,16 @@ export function apply(ctx: Context, config: Config): void {
     taskTimeoutMs: config.taskTimeoutMs ?? 1_800_000,
     syncBudgetMs: config.bridgeTimeoutMs ?? 300_000,
     escalation,
+  })
+
+  // M4-B: /bestofn command (lazily when the commands registry is mounted)
+  ctx.inject(['commands'], (commandCtx) => {
+    registerBestOfNCommand(commandCtx, {
+      getBridge,
+      store,
+      runner,
+      defaultModel: config.verifierModel,
+    })
   })
 
   if (config.promptSection ?? true) {

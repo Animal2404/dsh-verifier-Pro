@@ -39,8 +39,14 @@
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-commands": ">=0.1.0-rc <2",
     "cordis": ">=4.0.0-rc <5",
     "schemastery": "^3.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-commands": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
