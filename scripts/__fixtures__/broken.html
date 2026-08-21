@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>smoke test broken</title></head>
+<body>
+<script>
+  let state = 'ready';
+  const player = { x: 100, y: 100 };
+  function startGame() { state = 'playing'; }
+  function update() { throw new Error('update crashed on tick'); }
+  function draw() { throw new Error('draw failed'); }
+</script></body></html>
