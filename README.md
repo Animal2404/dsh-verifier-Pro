@@ -32,7 +32,23 @@ llm-verifier 0.2.0 (official PyPI package)
 
 ## 安装
 
-需要 Node 20+、Python 3.10+、一个能返回 logprobs 的后端凭据。
+需要 Node 18+、Python 3.10+、一个能返回 logprobs 的后端凭据。
+
+### 一键安装（推荐）
+
+```sh
+git clone https://github.com/Animal2404/dsh-verifier-brain.git
+cd dsh-verifier-brain
+node scripts/setup.mjs --check    # 诊断：告诉你缺什么、推荐适合你凭据的评分后端配置
+node scripts/setup.mjs --fix      # 自动修复：建 .venv + 安装 llm-verifier
+```
+
+`--check` 会根据你在 `~/.dsh/.credentials.yaml` 里已有的凭据**自动推荐评分后端配置**
+（有 DEEPSEEK_API_KEY → 推荐 deepseek-chat @ api.deepseek.com；有 OPENCODE_GO_API_KEY →
+推荐 opencode + deepseek-v4-flash；都没有 → 给出申请地址），并直接对比当前硬编码值，
+把"装完不能直接用"的根源指出来。按它给的片段改 `cordis.patch.yml` 两行即可适配你的环境。
+
+### 手动安装（等效于 --fix 做的事）
 
 ```sh
 # 1) Python 侧：官方 llm-verifier 装进项目 venv
@@ -47,10 +63,19 @@ bash scripts/build.sh
 #    或用 dsh plugin --profile web add <this package>
 ```
 
-凭据零配置：自动读取 `~/.dsh/.credentials.yaml`（`DEEPSEEK_API_KEY` /
-`VERTEX_API_KEY` / `OPENAI_API_KEY`+`OPENAI_BASE_URL` / `OPENROUTER_API_KEY`）。
-本机验证通过的后端：`opencode.ai/zen/go/v1` 的 `deepseek-v4-flash`（凭据键
-`OPENCODE_GO_API_KEY` 自动映射）。
+### 评分后端配置（重要！）
+
+默认配置里的 `verifierModel: deepseek-v4-flash` + `backendBaseUrl: https://opencode.ai/zen/go/v1`
+是**作者的环境**——你需要按自己持有的凭据修改 `cordis.patch.yml` 的这两行：
+
+| 你有的凭据 | verifierModel | backendBaseUrl |
+|---|---|---|
+| `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` |
+| `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash` | `https://opencode.ai/zen/go/v1` |
+| `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` |
+
+要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
+`node scripts/probe_logprobs.py <model>` 可验证你的端点是否返回 logprobs。
 
 ## 使用
 
