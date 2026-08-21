@@ -4,7 +4,7 @@
 /**
  * usage-a.cjs — /bestofn 双模式用法说明脚本
  *
- * 纯 Node.js、无任何外部依赖。运行后在 stdout 打印 dsh-verifier-brain
+ * 纯 Node.js、无任何外部依赖。运行后在 stdout 打印 dsh-verifier-Pro
  * 插件 /bestofn 命令双模式（团队模式 / 本地模式）的完整用法说明，
  * 并以 process.exit(0) 正常结束（冒烟测试检查退出码）。
  *
@@ -14,7 +14,7 @@
 const doc = String.raw`
 # /bestofn — Best-of-N 最优选择协议（双模式用法说明）
 
-\`/bestofn\` 是 dsh-verifier-brain 插件的核心命令：在 N 个独立候选实现中，
+\`/bestofn\` 是 dsh-verifier-Pro 插件的核心命令：在 N 个独立候选实现中，
 用"证据链 + verifier 打分"挑选最优者，并把落选者的长处合并进最终交付物。
 本说明覆盖两种运行模式：**团队模式**（队长派发成员实现）与**本地模式**（对已有产物打分）。
 

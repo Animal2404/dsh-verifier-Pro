@@ -1,18 +1,24 @@
-# dsh-verifier-brain
+# dsh-verifier-Pro
 
-[LLM-as-a-Verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) brain for
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — and for
-[dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams) in particular.
+<div align="center">
 
-**大脑：LLM-as-a-Verifier · 躯干：dsh-agent-teams。**
-本插件把官方框架的细粒度验证能力（基于 score-token logprob 分布的期望 reward，
-而非普通 LLM-as-a-Judge 的单点打分）做成 DSH agent 工具，并通过 system prompt
-策略注入，让它成为多智能体团队的内置评审器官。
+**简体中文** | [English](./README.en.md)
+
+</div>
+
+[LLM-as-a-Verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) 大脑插件，为
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 而生——尤其是
+[dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams) 多智能体团队。
+
+> 🧠 **大脑：LLM-as-a-Verifier · 躯干：dsh-agent-teams。**
+> 本插件把官方框架的细粒度验证能力（基于 score-token logprob 分布的期望 reward，
+> 而非普通 LLM-as-a-Judge 的单点打分）做成 DSH agent 工具，并通过 system prompt
+> 策略注入，让它成为多智能体团队的内置评审器官。
 
 ```
 DSH Agent
-  ↓ verifier_select / compare / track / progress / task_start / task_status
-dsh-verifier-brain (Node/TS host plugin)
+  ↓ verifier 工具（单一工具 × 8 action：select/compare/track/progress_*/task_*/…）
+dsh-verifier-Pro (Node/TS host plugin)
   ↓ JSON Lines over stdio (id-correlated, concurrent)
 bridge/verifier_brain_bridge.py (ThreadPool × N)
   ↓
@@ -37,8 +43,8 @@ llm-verifier 0.2.0 (official PyPI package)
 ### 一键安装（推荐）
 
 ```sh
-git clone https://github.com/Animal2404/dsh-verifier-brain.git
-cd dsh-verifier-brain
+git clone https://github.com/Animal2404/dsh-verifier-Pro.git
+cd dsh-verifier-Pro
 node scripts/setup.mjs --check    # 诊断：告诉你缺什么、推荐适合你凭据的评分后端配置
 node scripts/setup.mjs --fix      # 自动修复：建 .venv + 安装 llm-verifier
 ```
@@ -153,7 +159,7 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 ```yaml
 - insert:
     - id: verifier-brain
-      name: '@dsh-external/dsh-verifier-brain'
+      name: '@dsh-external/dsh-verifier-Pro'
       config:
         bridgeTimeoutMs: 300000
         verifierModel: deepseek-v4-flash

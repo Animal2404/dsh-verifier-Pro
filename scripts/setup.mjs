@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ============================================================
- * merged-setup.mjs —— dsh-verifier-brain 一键安装 / 诊断脚本
+ * merged-setup.mjs —— dsh-verifier-Pro 一键安装 / 诊断脚本
  * ============================================================
  * 本文件是 setup-a / setup-b / setup-c 三份功能等价实现的合并版：
  *   · 底座：setup-c（最全的测试覆盖：四态 .venv 判定、占位符凭据过滤、
@@ -666,7 +666,7 @@ function renderCredentialSection(creds, root, indent = '    ') {
 function runCheck(root) {
   console.log('');
   console.log(bold(hr('=')));
-  console.log(bold(' dsh-verifier-brain 就绪报告（--check 只读诊断模式）'));
+  console.log(bold(' dsh-verifier-Pro 就绪报告（--check 只读诊断模式）'));
   console.log(gray(` ${new Date().toLocaleString()}    脚本：${SELF_NAME}`));
   console.log(bold(hr('=')));
 
@@ -802,7 +802,7 @@ function finishFix(exitCode, manualItems) {
 function runFix(root) {
   console.log('');
   console.log(bold(hr('=')));
-  console.log(bold(' dsh-verifier-brain 自动修复（--fix）'));
+  console.log(bold(' dsh-verifier-Pro 自动修复（--fix）'));
   console.log(gray(` 项目根目录：${root}`));
   console.log(bold(hr('=')));
   console.log('');
@@ -966,7 +966,7 @@ function runFix(root) {
 
 function printHelp() {
   console.log('');
-  console.log(bold(`${SELF_NAME} —— dsh-verifier-brain 一键安装 / 诊断脚本`));
+  console.log(bold(`${SELF_NAME} —— dsh-verifier-Pro 一键安装 / 诊断脚本`));
   console.log('');
   console.log('用法：');
   console.log(`  node ${SELF_NAME} [--check | --fix] [--root <项目根目录>]`);
@@ -988,7 +988,7 @@ function printHelp() {
   console.log('示例：');
   console.log(`  node ${SELF_NAME}                # clone 之后先做个体检`);
   console.log(`  node ${SELF_NAME} --fix          # 一键补齐 Python 环境`);
-  console.log(`  node ${SELF_NAME} --check --root D:\\code\\dsh-verifier-brain`);
+  console.log(`  node ${SELF_NAME} --check --root D:\\code\\dsh-verifier-Pro`);
   console.log('');
   console.log('说明：');
   console.log('  · 纯 Node 实现、零第三方依赖；要求 Node >= 18；Windows / macOS / Linux 均可。');
