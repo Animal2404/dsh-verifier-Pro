@@ -17,8 +17,10 @@
         # Async verifier-task timeout in ms (long tournament scorings).
         taskTimeoutMs: 1800000
         # Default verifier model; per-call `model` args override.
-        # Working default: deepseek-v4-flash via opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
-        verifierModel: deepseek-v4-flash
+        # 2026-08-22: deepseek-v4-flash 被 Open Code 上游 DFLASH 投机解码禁用
+        # logprobs 返回（400 "does not support return_logprob"），切换到实测
+        # 支持 logprobs 的 deepseek-v4-pro（三份独立调查报告实测矩阵一致）。
+        verifierModel: deepseek-v4-pro
         # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
         backendBaseUrl: https://opencode.ai/zen/go/v1
         # Concurrent workers inside the Python bridge.
