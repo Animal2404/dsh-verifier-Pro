@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>smoke test good</title></head>
+<body><canvas id="c" width="960" height="540"></canvas>
+<script>
+  let state = 'ready';
+  const player = { x: 100, y: 100, grounded: true };
+  function startGame() { state = 'playing'; }
+  function update() { player.x += 1; if (player.x > 900) player.x = 100; }
+  function draw() {
+    const c = document.getElementById('c');
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#4a90d9';
+    ctx.fillRect(0, 0, 960, 540);
+    ctx.fillStyle = '#e74c3c';
+    ctx.fillRect(player.x, player.y, 40, 40);
+  }
+</script></body></html>
