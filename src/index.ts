@@ -25,7 +25,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { PythonBridge } from './bridge.js'
 import { buildBridgeEnv } from './credentials.js'
 import { VerifierStore } from './persist.js'
-import { verifierUsageSection } from './prompt.js'
+import { verifierUsageSection, bestOfNProtocolSection } from './prompt.js'
 import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
 import { registerBestOfNCommand } from './bestofn.js'
@@ -158,6 +158,11 @@ export function apply(ctx: Context, config: Config): void {
       order: config.promptSectionOrder ?? 118,
       text: verifierUsageSection(config.verifierModel),
     }), 'verifier-brain: prompt section')
+    ctx.effect(() => ctx.systemPrompt.section({
+      name: 'verifier-brain:bestofn',
+      order: (config.promptSectionOrder ?? 118) + 1,
+      text: bestOfNProtocolSection(),
+    }), 'verifier-brain: bestofn protocol section')
   }
 
   ctx.logger.info('verifier-brain: ready (python=%s, state=%s)', pythonBin, store.stateDir)

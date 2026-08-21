@@ -41,29 +41,40 @@ registerBestOfNCommand(mockCtx, { getBridge, store, runner, defaultModel: 'deeps
 console.log('注册的命令:', mockCtx._def?.name, '|', mockCtx._def?.description)
 
 const handler = mockCtx._def.handler
+const followed = []
 const invocation = {
   rawInput: '',
-  agent: {},
+  agent: {
+    followup: (msg) => { followed.push(msg) },
+  },
   signal: new AbortController().signal,
   attachments: [],
 }
 
 async function run(input) {
+  followed.length = 0
   invocation.rawInput = input
   const result = await handler(invocation)
   console.log('\n=== /bestofn ' + input + ' ===')
   console.log('kind:', result.kind)
   console.log(result.text)
+  if (followed.length) {
+    console.log('--- followup 激活指令 ---')
+    console.log(followed[0].content[0].text)
+  }
   return result
 }
 
-// 测试1: 用法错误（<2 候选）
-await run('onlyone')
+// 测试1: 团队模式用法错误（无 goal）
+await run('')
 
-// 测试2: 正常闭环（good vs broken HTML，带各自 summary）
-await run(`scripts/__fixtures__/good.html scripts/__fixtures__/broken.html --summary good=完整游戏实现 --summary broken=有崩溃的游戏 --quick`)
+// 测试1b: 团队模式正常 → followup 激活
+await run('实现一个贪吃蛇游戏 4')
 
-// 测试3: 两个都存活的候选 → select 优选路径
-await run(`scripts/__fixtures__/good.html scripts/__fixtures__/other.html --summary good=完整游戏实现绿色背景 --summary other=变体游戏实现蓝色方块 --quick`)
+// 测试2: 本地模式崩溃出局
+await run(`--local scripts/__fixtures__/good.html scripts/__fixtures__/broken.html --summary good=完整游戏实现 --summary broken=有崩溃的游戏 --quick`)
+
+// 测试3: 本地模式 select 优选（两个都存活）
+await run(`--local scripts/__fixtures__/good.html scripts/__fixtures__/other.html --summary good=完整游戏实现绿色背景 --summary other=变体游戏实现蓝色方块 --quick`)
 
 bridge.close()
