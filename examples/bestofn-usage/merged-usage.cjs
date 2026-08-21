@@ -17,9 +17,9 @@
  */
 
 const MD = [
-  '# /bestofn 命令双模式完整用法说明（dsh-verifier-brain）',
+  '# /bestofn 命令双模式完整用法说明（dsh-verifier-Pro）',
   '',
-  '`/bestofn` 是 **dsh-verifier-brain** 插件的 Best-of-N 最优选择协议命令：对同一个目标，',
+  '`/bestofn` 是 **dsh-verifier-Pro** 插件的 Best-of-N 最优选择协议命令：对同一个目标，',
   '拿到 N 份**独立完整**的候选实现，用「证据链（evidence chain）冒烟硬筛选 + verifier 打分」',
   '选出最优解，并把所有幸存候选的最佳部分整合成一份最终交付物。',
   '',
@@ -97,7 +97,7 @@ const MD = [
   '### 示例 1：团队模式——自动生成 N 个候选再选优',
   '',
   '```',
-  '/bestofn 为 dsh-verifier-brain 写一个零依赖的 markdown 用法说明脚本，退出码必须为 0 3',
+  '/bestofn 为 dsh-verifier-Pro 写一个零依赖的 markdown 用法说明脚本，退出码必须为 0 3',
   '```',
   '',
   '→ 插件派出 3 个成员各自独立写脚本 → 证据链冒烟（`ok=false` 的当场出局）→ `verifier select` 打分排序 → 整合者合并 3 份幸存者 → 门禁比对合并版 vs 冠军 → 输出最终脚本与完整分数报告。',

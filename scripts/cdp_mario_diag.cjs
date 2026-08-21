@@ -2,7 +2,7 @@
 const fs = require('fs');
 
 const FILE = process.argv[2] || 'file:///E:/DeepSeek/mario-b.html';
-const OUT = process.argv[3] || 'E:/DeepSeek/dsh-verifier-brain/tmp_articles';
+const OUT = process.argv[3] || 'E:/DeepSeek/dsh-verifier-Pro/tmp_articles';
 
 async function main() {
   // find page target

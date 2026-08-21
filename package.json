@@ -1,6 +1,6 @@
 {
-  "name": "@dsh-external/dsh-verifier-brain",
-  "version": "0.4.0",
+  "name": "@dsh-external/dsh-verifier-Pro",
+  "version": "0.4.1",
   "description": "LLM-as-a-Verifier brain for DSH agent teams: fine-grained verification (select/compare/track/progress) via official llm-verifier Python bridge, with team best-of-N selection and reviewer quality gates",
   "type": "module",
   "main": "./lib/index.js",
@@ -21,11 +21,11 @@
   ],
   "license": "BSD-3-Clause",
   "author": {
-    "name": "dsh-verifier-brain authors"
+    "name": "dsh-verifier-Pro authors"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Animal2404/dsh-verifier-brain.git"
+    "url": "git+https://github.com/Animal2404/dsh-verifier-Pro.git"
   },
   "keywords": [
     "dsh",

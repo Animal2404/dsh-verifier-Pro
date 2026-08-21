@@ -2,7 +2,7 @@
 'use strict';
 
 // ============================================================================
-// usage-c.cjs — dsh-verifier-brain 插件 /bestofn 命令双模式完整用法说明
+// usage-c.cjs — dsh-verifier-Pro 插件 /bestofn 命令双模式完整用法说明
 //
 // 纯 Node.js，无任何外部依赖。运行时将整份 Markdown 用法说明打印到 stdout，
 // 并以 process.exit(0) 正常结束（冒烟测试检查退出码）。
@@ -16,7 +16,7 @@
 
 const DOC = `# /bestofn 命令双模式完整用法说明
 
-\`/bestofn\` 是 **dsh-verifier-brain** 插件的 Best-of-N 最优选择协议命令。它从 N 个独立实现的候选中，用「证据链（evidence chain）+ LLM 作为验证器（verifier）打分」的方式选出最优解，并把所有幸存候选的最佳部分整合成一份最终交付物。
+\`/bestofn\` 是 **dsh-verifier-Pro** 插件的 Best-of-N 最优选择协议命令。它从 N 个独立实现的候选中，用「证据链（evidence chain）+ LLM 作为验证器（verifier）打分」的方式选出最优解，并把所有幸存候选的最佳部分整合成一份最终交付物。
 
 命令支持 **两种模式**：**团队模式**（自动派生成员并并行实现）与 **本地模式**（对已有产物直接打分）。
 

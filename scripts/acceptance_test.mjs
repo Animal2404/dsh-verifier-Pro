@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dsh-verifier-brain 验收回归脚本
+ * dsh-verifier-Pro 验收回归脚本
  * 对应 ITERATION_PLAN.md §3 十个验收用例
  */
 
@@ -102,7 +102,7 @@ async function runTest(name, fn) {
 
 async function main() {
   console.log('='.repeat(60));
-  console.log('dsh-verifier-brain 验收回归 (ITERATION_PLAN §3)');
+  console.log('dsh-verifier-Pro 验收回归 (ITERATION_PLAN §3)');
   console.log('='.repeat(60));
   console.log('');
 

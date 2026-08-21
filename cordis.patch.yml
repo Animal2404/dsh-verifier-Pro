@@ -1,4 +1,4 @@
-# dsh-verifier-brain bundle patch: mounts the verifier-brain plugin into the
+# dsh-verifier-Pro bundle patch: mounts the verifier-brain plugin into the
 # host composition of a dsh profile. The plugin registers its verifier_* tools
 # into the shared `tools` registry and one usage section into the global
 # system prompt, so every session can drive LLM-as-a-Verifier through natural
@@ -10,7 +10,7 @@
 - insert:
     - id: verifier-brain
       # Node-resolvable package name — must stay in sync with package.json `name`.
-      name: '@dsh-external/dsh-verifier-brain'
+      name: '@dsh-external/dsh-verifier-Pro'
       config:
         # Sync tool-call bridge timeout in ms.
         bridgeTimeoutMs: 300000

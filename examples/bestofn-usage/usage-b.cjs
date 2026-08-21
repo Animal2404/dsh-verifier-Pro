@@ -4,15 +4,15 @@
 /**
  * usage-b.cjs — /bestofn 双模式用法说明脚本（Best-of-N 演练成员 B 的独立实现）
  *
- * 纯 Node，无任何外部依赖。运行时把 dsh-verifier-brain 插件 /bestofn 命令的
+ * 纯 Node，无任何外部依赖。运行时把 dsh-verifier-Pro 插件 /bestofn 命令的
  * 双模式（团队模式 + 本地模式）完整用法说明以 markdown 打印到 stdout，
  * 并以 process.exit(0) 正常结束（冒烟测试检查退出码）。
  */
 
 const MD = [
-  '# /bestofn 命令双模式用法说明（dsh-verifier-brain）',
+  '# /bestofn 命令双模式用法说明（dsh-verifier-Pro）',
   '',
-  '`/bestofn` 是 dsh-verifier-brain 插件的 Best-of-N 最优方案选择协议：对同一个目标，',
+  '`/bestofn` 是 dsh-verifier-Pro 插件的 Best-of-N 最优方案选择协议：对同一个目标，',
   '拿到 N 份**独立完整**的候选实现，用证据链做可运行性硬筛选，再用 verifier 打分排序，',
   '最后把幸存者的优点合并成一份交付物，并通过门禁比对确认合并版本不劣于冠军。',
   '',
@@ -87,7 +87,7 @@ const MD = [
   '### 示例 1：团队模式——自动生成 N 个候选再选优',
   '',
   '```',
-  '/bestofn 为 dsh-verifier-brain 写一个零依赖的 markdown 用法说明脚本，退出码必须为 0 3',
+  '/bestofn 为 dsh-verifier-Pro 写一个零依赖的 markdown 用法说明脚本，退出码必须为 0 3',
   '```',
   '',
   '→ 插件派出 3 个成员，各自独立写脚本 → 证据链冒烟（`ok=false` 的当场出局）→ `verifier select` 打分排序 → 整合者合并 3 份幸存者 → 门禁比对合并版 vs 冠军 → 输出最终脚本与分数报告。',

@@ -62,7 +62,7 @@ async function main() {
     `);
     console.log(`=== ${f}: ${result}`);
     const r = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync(`E:/DeepSeek/dsh-verifier-brain/tmp_articles/smoke-${f.replace('.html', '')}.png`, Buffer.from(r.result.data, 'base64'));
+    fs.writeFileSync(`E:/DeepSeek/dsh-verifier-Pro/tmp_articles/smoke-${f.replace('.html', '')}.png`, Buffer.from(r.result.data, 'base64'));
   }
   ws.close();
   process.exit(0);
