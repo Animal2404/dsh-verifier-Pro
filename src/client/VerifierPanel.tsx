@@ -141,7 +141,14 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     unstable: '多次独立评审的赢家不一致，说明模型也拿不准——建议人工复核后再决定，不要自动采信本次结果。',
     escalated: `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`,
   }
-  const noticeText = STATE_NOTES[stateKey] ?? null
+  // F1 透传：带 anomaly/warning 的"正常/升级"结果也必须有可见警告——
+  // 否则越界分被静默裁剪后，用户看到的是绿色"正常"，防线形同虚设。
+  const hasAnomaly = data?.anomaly === 'reward_out_of_range' || data?.anomaly === 'score_out_of_range'
+    || (typeof data?.warning === 'string' && data.warning.includes('裁剪'))
+  const noticeText = STATE_NOTES[stateKey]
+    ?? (hasAnomaly
+      ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
+      : null)
   // 宿主的原始细节（更技术性）作为补充行；避免与统一模板重复。
   const hostDetail = typeof data?.warning === 'string'
     ? data.warning

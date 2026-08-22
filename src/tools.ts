@@ -308,6 +308,17 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     try {
       let r = await gatedRequest<Record<string, unknown>>(deps, 'compare', mkRepParams(swap), signal)
       if (swap) r = { reward_a: r.reward_b, reward_b: r.reward_a }
+      // F1: escalation reps pass the same clamp01/anomaly gate as k1 —
+      // a compromised model cannot smuggle out-of-range rewards through the
+      // later rounds just because round one happened to be sane.
+      const ra = clamp01(r.reward_a)
+      const rb = clamp01(r.reward_b)
+      if (ra.clamped || rb.clamped) {
+        r.anomaly = 'reward_out_of_range'
+        r.warning = `⚠️ 升级评估第 ${i} 轮返回越界值已裁剪到 [0,1]（raw a=${String(r.reward_a)}, b=${String(r.reward_b)}）`
+      }
+      r.reward_a = ra.value
+      r.reward_b = rb.value
       reps.push(r)
     } catch (error) {
       if (reps.length < 2) throw error
@@ -321,6 +332,10 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   const winners = reps.map(winnerOf)
   const agreeing = winners.filter((w) => w === w1 && w !== 'tie').length
 
+  // F1: unstable 分支同样只回传裁剪后的分数，并保留任一轮的异常标记。
+  const anyAnomaly = reps.some((r) => r.anomaly === 'reward_out_of_range')
+  const anomalyWarning = reps.find((r) => typeof r.warning === 'string' && r.anomaly === 'reward_out_of_range')?.warning as string | undefined
+
   // Direction-inconsistent: report raw, never silently average.
   if (agreeing < Math.ceil(kUsed / 2)) {
     return {
@@ -328,6 +343,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       escalated: true,
       k_used: kUsed,
       message: '多次评估胜者不一致，信号不稳定，建议人工复核',
+      ...(anyAnomaly ? { anomaly: 'reward_out_of_range', warning: anomalyWarning } : {}),
       reps: reps.map((r) => ({ reward_a: r.reward_a, reward_b: r.reward_b })),
     }
   }
@@ -342,6 +358,14 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     margin_after: Math.abs(avg('reward_a') - avg('reward_b')),
     consistency: `${agreeing}/${kUsed}${agreeing < kUsed ? '，建议谨慎参考' : ''}`,
     cached: false,
+  }
+  // F1: composite 不能丢掉 k1/reps 的异常标记——否则越界警告在升级后凭空消失。
+  if (k1.anomaly !== undefined) {
+    composite.anomaly = k1.anomaly
+    if (typeof k1.warning === 'string') composite.warning = k1.warning
+  } else if (anyAnomaly) {
+    composite.anomaly = 'reward_out_of_range'
+    composite.warning = anomalyWarning
   }
   deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [composite.reward_a, composite.reward_b], duration_ms: Date.now() - started })
   resultCache.set(baseKey + ':esc', Promise.resolve(composite))
@@ -455,6 +479,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       escalated: true,
       k_used: 3,
       message: '两次评估第一名不一致，信号不稳定，建议人工复核',
+      ...(k1.anomaly !== undefined ? { anomaly: k1.anomaly, warning: k1.warning } : {}),
       initial: { index: k1.index, scores: k1.scores },
       escalated_result: { index: escalated.index, scores: escalated.scores },
     }
@@ -463,9 +488,16 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // Same winner: average scores element-wise when shapes match — but ONLY when
   // first pass and escalation used the SAME model (审计二修正：跨模型条件期望
   // 不可平均)。Tiered scoring 时以强模型的升级结果为准，不与首评混合。
+  // F1: 升级结果同样过 clamp01——平均混入未裁剪值会让 composite 越界。
   const tiered = Boolean(deps.esc.escalationModel) && deps.esc.escalationModel !== p.model
   const s1 = Array.isArray(k1.scores) ? k1.scores as number[] : []
-  const s3 = Array.isArray(escalated.scores) ? escalated.scores as number[] : []
+  let s3 = Array.isArray(escalated.scores) ? escalated.scores as number[] : []
+  const escClamped = s3.map((v) => clamp01(v))
+  if (escClamped.some((c) => c.clamped)) {
+    escalated.anomaly = escalated.anomaly ?? 'score_out_of_range'
+    escalated.warning = `⚠️ 升级评估返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(s3)}）`
+  }
+  s3 = escClamped.map((c) => c.value)
   const averaged = (!tiered && s1.length === s3.length && s1.every((v) => typeof v === 'number'))
     ? s3.map((v, i) => (v + Number(s1[i])) / 2)
     : s3
@@ -480,6 +512,11 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     margin_after: marginAfter,
     consistency: 'top1 一致',
     cached: false,
+  }
+  // F1: k1 的异常标记不因升级而丢失（escalated 自身的已在 spread 中带上）。
+  if (composite.anomaly === undefined && k1.anomaly !== undefined) {
+    composite.anomaly = k1.anomaly
+    if (typeof k1.warning === 'string') composite.warning = k1.warning
   }
   deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: composite.index as number, scores: averaged, duration_ms: Date.now() - started })
   resultCache.set(baseKey + ':esc', Promise.resolve(composite))
@@ -677,6 +714,9 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       autoEscalate: escalation?.autoEscalate ?? true,
       escalateThreshold: escalation?.escalateThreshold ?? 0.15,
       maxEscalateK: escalation?.maxEscalateK ?? 3,
+      // U-B1: escalationModel 必须透传到同步工具路径——此前这里重建 esc 时
+      // 丢掉了它，分级评分（降本4）对最常用的同步 select/compare 静默失效。
+      escalationModel: escalation?.escalationModel,
     },
     budgetMs: () => syncBudgetMs ?? 300_000,
     scoringGate,
