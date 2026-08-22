@@ -257,15 +257,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   scores: { display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 },
   score: { color: 'var(--dsw-alias-label-secondary)' },
-  // 赢家仅用加粗 + 🏆 标记，不额外配色——卡片里唯一的彩色元素是右上角徽章。
-  scoreTop: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 600 },
+  // 最优方案：绿色加粗 + 🏆（用户指定的唯一非徽章彩色位）。
+  scoreTop: { color: 'var(--dsw-alias-state-success-primary)', fontWeight: 600 },
   warning: {
     marginTop: 6,
     padding: '4px 8px',
     borderRadius: 4,
     fontSize: 'var(--dsw-font-xs-13-font-size, 13px)',
     lineHeight: 'var(--dsw-font-xs-13-line-height, 1.5)',
-    color: 'var(--dsw-alias-state-warn-label)',
+    color: 'var(--dsw-alias-label-secondary)',
     background: 'var(--dsw-alias-bg-layer-1)',
     border: '1px solid var(--dsw-alias-border-l2)',
   },
