@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-verifier-pro",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "LLM-as-a-Verifier brain for DSH agent teams: fine-grained verification (select/compare/track/progress) via official llm-verifier Python bridge, with team best-of-N selection and reviewer quality gates",
   "type": "module",
   "main": "./lib/index.js",
