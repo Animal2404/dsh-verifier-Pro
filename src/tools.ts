@@ -681,6 +681,15 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       output: {
         schema: LOOSE_OBJECT_SCHEMA,
         render: (_args: unknown, value: Record<string, unknown>) => [renderResult(value)],
+        // Official presentation channel (mirrors read/web tools): a compact
+        // UI-facing projection persisted with the session log, surfacing at
+        // block.meta for the keyed client card — the model never sees it.
+        presentationMeta: (args: unknown, value: Record<string, unknown>) => ({
+          verifier: {
+            action: (args as { action?: string })?.action ?? 'verifier',
+            ...value,
+          },
+        }),
       },
       async execute(args: VerifierToolArgs, context?: { signal?: AbortSignal }): Promise<Record<string, JsonValue>> {
         const bridge = await getBridge()

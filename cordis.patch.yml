@@ -18,11 +18,11 @@
         taskTimeoutMs: 1800000
         # Default verifier model; per-call `model` args override.
         # 2026-08-22: deepseek-v4-flash 被 Open Code 上游 DFLASH 投机解码禁用
-        # logprobs 返回（400 "does not support return_logprob"），切换到实测
-        # 支持 logprobs 的 deepseek-v4-pro（三份独立调查报告实测矩阵一致）。
-        verifierModel: deepseek-chat
+        # logprobs 返回（400），v4-pro 实测可用。DeepSeek 官方账户余额不足
+        # （402），切回 opencode 组合；充值后可换回 deepseek-chat。
+        verifierModel: deepseek-v4-pro
         # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
-        backendBaseUrl: https://api.deepseek.com
+        backendBaseUrl: https://opencode.ai/zen/go/v1
         # Concurrent workers inside the Python bridge.
         maxWorkers: 4
         # Register the verifier usage policy into the global system prompt.
@@ -33,8 +33,6 @@
         escalateThreshold: 0.15
         maxEscalateK: 3
 
-# Client-side plugin for Web UI (Verifier panel + settings)
-- insert:
-    - id: verifier-brain-client
-      name: '@dsh-external/dsh-verifier-pro'
-      client: true
+# Client UI（Verifier panel + settings）不走 cordis insert：
+# Web 端通过 package.json 的 dsh.client 声明 + exports["./client"] 自动发现，
+# 这里再 insert 会把 host 主模块重复 apply 一次，导致 tool "verifier" 重复注册。

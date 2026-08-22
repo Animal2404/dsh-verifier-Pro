@@ -60,6 +60,14 @@ if [ -n "$INSTALL" ]; then
   if [ -d "$NM/@deepseek-ai/dsh-commands" ]; then
     link_pkg @deepseek-ai/dsh-commands "$NM/@deepseek-ai/dsh-commands"
   fi
+  # Client half: type-only imports (@deepseek-ai/dsh-client-runtime/client,
+  # @deepseek-ai/dsh-client-ui-tool/client).
+  if [ -d "$NM/@deepseek-ai/dsh-client-runtime" ]; then
+    link_pkg @deepseek-ai/dsh-client-runtime "$NM/@deepseek-ai/dsh-client-runtime"
+  fi
+  if [ -d "$NM/@deepseek-ai/dsh-client-ui-tool" ]; then
+    link_pkg @deepseek-ai/dsh-client-ui-tool "$NM/@deepseek-ai/dsh-client-ui-tool"
+  fi
   if [ -d "$NM/@types/node" ]; then link_pkg @types/node "$NM/@types/node"; fi
   STD_SCHEMA=$(find "$NM/.pnpm" -maxdepth 1 -type d -iname '@standard-schema+spec@*' 2>/dev/null | head -1 || true)
   if [ -z "$STD_SCHEMA" ] && [ -d "$NM/@standard-schema/spec" ]; then
@@ -137,5 +145,8 @@ if [ -z "$TSDOWN" ]; then
 fi
 
 "$TSDOWN" -c tsdown.config.ts
+
+echo "=== Wrapping client bundle into ModuleLoader protocol ==="
+node scripts/wrap_client.mjs
 
 echo "=== Build complete ==="

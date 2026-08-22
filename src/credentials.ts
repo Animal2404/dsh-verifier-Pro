@@ -68,8 +68,33 @@ export function buildBridgeEnv(extra: Record<string, string | undefined> = {}): 
       }
       // Proxy aliases: expose a harness-only credential under the standard
       // OpenAI-compatible names the official llm-verifier backend reads.
+      //
+      // P0 smoke-fix (2026-08-22): the alias previously fired whenever
+      // OPENAI_API_KEY was empty — even when a native provider key existed.
+      // With both DEEPSEEK_API_KEY and OPENCODE_GO_API_KEY in the file, the
+      // alias filled OPENAI_API_KEY with the OpenCode key while config pointed
+      // at api.deepseek.com → 401 (opencode key sent to DeepSeek). Rule now:
+      // an explicit native-provider credential always outranks the proxy
+      // alias fallback.
+      const nativeProviderPresent =
+        ['DEEPSEEK_API_KEY', 'VERTEX_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']
+          .some((k) => env[k] !== undefined && env[k] !== '')
+        || [...parsed.keys()].some((k) =>
+          ['DEEPSEEK_API_KEY', 'VERTEX_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY'].includes(k),
+        )
+      // An explicit backendBaseUrl in plugin config IS the user's backend
+      // choice: when it names an aliased proxy, that proxy's credential wins
+      // over the generic native-provider fallback (e.g. DeepSeek out of
+      // balance → user points backendBaseUrl at opencode).
+      const explicitBaseUrl = typeof extra.OPENAI_BASE_URL === 'string' && extra.OPENAI_BASE_URL !== ''
+        ? extra.OPENAI_BASE_URL.replace(/\/+$/, '')
+        : undefined
       for (const alias of ALIASES) {
         const hasTarget = (key: string): boolean => env[key] !== undefined && env[key] !== ''
+        const aliasChosenByConfig = explicitBaseUrl !== undefined
+          && alias.baseUrl !== undefined
+          && explicitBaseUrl === alias.baseUrl.replace(/\/+$/, '')
+        if (nativeProviderPresent && !aliasChosenByConfig) continue
         if (!hasTarget(alias.to)) {
           const value = parsed.get(alias.from) ?? process.env[alias.from]
           if (value) {
