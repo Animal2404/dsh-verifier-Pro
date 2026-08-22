@@ -17,3 +17,5 @@ docs/*
 replacements.txt
 *.bak.*
 *.bak
+
+AUDIT-*.md
