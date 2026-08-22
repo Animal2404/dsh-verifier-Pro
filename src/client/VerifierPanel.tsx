@@ -122,11 +122,33 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     : data ? { text: BADGE_LABELS.ok!, colorToken: 'var(--dsw-alias-state-success-primary)' }
     : { text: ACTION_LABELS[action] ?? action, colorToken: 'var(--dsw-alias-label-tertiary)' }
 
-  // 大白话解释：为什么会出现"分差小 · 已评N次"——单次评分有偶然性，接近时
-  // 自动多评几次（每次交换 A/B 顺序消除偏向）再取平均，结果更可靠。
-  const escalateNote = escalated
-    ? `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`
-    : null
+  // 大白话解释系统：每个非绿色徽章都配一句"这是什么意思 + 建议怎么办"。
+  // 宿主若附带了更具体的 warning/message，会作为第二行追加在同一张说明卡里。
+  const stateKey: 'running' | 'error' | 'degraded' | 'flat' | 'unstable' | 'escalated' | 'ok' | 'plain' =
+    running ? 'running'
+    : isError ? 'error'
+    : signal === 'degraded' ? 'degraded'
+    : signal === 'flat' ? 'flat'
+    : signal === 'unstable' ? 'unstable'
+    : escalated ? 'escalated'
+    : data ? 'ok'
+    : 'plain'
+
+  const STATE_NOTES: Record<string, string> = {
+    error: '这次调用失败了——可能是网络、后端余额或配置问题。点开卡片看错误详情，或展开会话轨迹排查。',
+    degraded: '⚠️ 本次所有候选都得 0.5 分——这是评分批量失败的特征（常见原因：模型不支持 logprob 打分）。分数不可用于排名，请更换模型重试或人工复核。',
+    flat: '几个方案得分几乎一样，排名没有参考意义——建议用「对比评审」对前两名单独复核，或细化评审标准。',
+    unstable: '多次独立评审的赢家不一致，说明模型也拿不准——建议人工复核后再决定，不要自动采信本次结果。',
+    escalated: `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`,
+  }
+  const noticeText = STATE_NOTES[stateKey] ?? null
+  // 宿主的原始细节（更技术性）作为补充行；避免与统一模板重复。
+  const hostDetail = typeof data?.warning === 'string'
+    ? data.warning
+    : typeof data?.message === 'string'
+      ? data.message
+      : null
+  const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable'
 
   const actionLabel = ACTION_LABELS[action] ?? action
 
@@ -164,12 +186,13 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
         </div>
       )}
 
-      {!running && typeof data?.warning === 'string' && (
-        <div style={styles.warning}>{data.warning}</div>
-      )}
-
-      {!running && escalateNote && (
-        <div style={styles.note}>💡 {escalateNote}</div>
+      {!running && noticeText && (
+        <div style={isWarnStyle ? styles.warning : styles.note}>
+          {stateKey === 'escalated' ? '💡 ' : ''}{noticeText}
+          {hostDetail && hostDetail !== noticeText && (
+            <div style={styles.noticeDetail}>{hostDetail}</div>
+          )}
+        </div>
       )}
 
       {expanded && (
@@ -252,6 +275,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)',
     background: 'var(--dsw-alias-bg-layer-2)',
     border: '1px solid var(--dsw-alias-border-l1)',
+  },
+  noticeDetail: {
+    marginTop: 4,
+    paddingTop: 4,
+    borderTop: '1px dashed color-mix(in srgb, currentColor 30%, transparent)',
+    opacity: 0.85,
   },
   pre: {
     marginTop: 6,
