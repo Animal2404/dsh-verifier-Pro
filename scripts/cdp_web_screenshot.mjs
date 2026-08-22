@@ -40,6 +40,17 @@ function send(method, params = {}) {
 }
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data)
+  if (msg.method === 'Runtime.consoleAPICalled' && (msg.params.type === 'error' || msg.params.type === 'warning')) {
+    const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ')
+    console.log(`[console.${msg.params.type}]`, text.slice(0, 300))
+  }
+  if (msg.method === 'Log.entryAdded') {
+    console.log(`[log.${msg.params.entry.level}]`, String(msg.params.entry.text).slice(0, 300))
+  }
+  if (msg.method === 'Runtime.exceptionThrown') {
+    const d = msg.params.exceptionDetails
+    console.log('[exception]', (d.exception?.description || d.text || '').slice(0, 400))
+  }
   if (msg.id && pending.has(msg.id)) {
     const { res, rej } = pending.get(msg.id)
     pending.delete(msg.id)
@@ -49,6 +60,7 @@ ws.onmessage = (ev) => {
 
 await send('Page.enable')
 await send('Runtime.enable')
+await send('Log.enable')
 await new Promise((r) => setTimeout(r, WAIT_MS))
 
 // Navigate into the session whose sidebar title matches SESSION_MATCH.
@@ -79,7 +91,7 @@ for (let i = 0; i < 6; i++) {
 }
 
 const { result } = await send('Runtime.evaluate', {
-  expression: 'JSON.stringify({title: document.title, url: location.href, callRows: document.querySelectorAll("[data-chat-call-id]").length, verifierCards: [...document.querySelectorAll("div")].filter(d => (d.textContent||"").trim().startsWith("🔍 verifier")).length})',
+  expression: `JSON.stringify({title: document.title, url: location.href, callRows: document.querySelectorAll("[data-chat-call-id]").length, verifierCards: [...document.querySelectorAll("div")].filter(d => /^🔍 (对比评审|择优评选|轨迹打分|进度追踪|异步任务|用量统计|verifier)/.test((d.textContent||"").trim())).length})`,
   returnByValue: true,
 })
 console.log('page probe:', result.value)

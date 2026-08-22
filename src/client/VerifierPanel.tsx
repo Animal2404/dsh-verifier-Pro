@@ -150,6 +150,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
       : null
   const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable'
 
+  // 候选字母标：A/B/C/D…（超过 8 个回退数字）。
+  const letterAt = (i: number): string => 'ABCDEFGH'[i] ?? String(i + 1)
   const actionLabel = ACTION_LABELS[action] ?? action
 
   return (
@@ -172,8 +174,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
       {!running && index !== null && scores && (
         <div style={styles.scores}>
           {scores.map((s, i) => (
-            <span key={i} style={i === index ? styles.scoreBest : styles.score}>
-              方案{i + 1}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆 最优' : ''}
+            <span key={i} style={i === index ? styles.scoreTop : styles.score}>
+              {letterAt(i)}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
             </span>
           ))}
         </div>
@@ -181,8 +183,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && rewardA !== null && rewardB !== null && (
         <div style={styles.scores}>
-          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreBest : styles.score}>方案A: {rewardA.toFixed(3)}</span>
-          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreBest : styles.score}>方案B: {rewardB.toFixed(3)}</span>
+          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreTop : styles.score}>A: {rewardA.toFixed(3)}</span>
+          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreTop : styles.score}>B: {rewardB.toFixed(3)}</span>
         </div>
       )}
 
@@ -255,7 +257,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   scores: { display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 },
   score: { color: 'var(--dsw-alias-label-secondary)' },
-  scoreBest: { color: 'var(--dsw-alias-state-success-primary)', fontWeight: 600 },
+  // 赢家仅用加粗 + 🏆 标记，不额外配色——卡片里唯一的彩色元素是右上角徽章。
+  scoreTop: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 600 },
   warning: {
     marginTop: 6,
     padding: '4px 8px',
@@ -263,8 +266,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 'var(--dsw-font-xs-13-font-size, 13px)',
     lineHeight: 'var(--dsw-font-xs-13-line-height, 1.5)',
     color: 'var(--dsw-alias-state-warn-label)',
-    background: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent)',
-    border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, transparent)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    border: '1px solid var(--dsw-alias-border-l2)',
   },
   note: {
     marginTop: 6,
@@ -273,7 +276,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 'var(--dsw-font-xs-13-font-size, 13px)',
     lineHeight: 'var(--dsw-font-xs-13-line-height, 1.5)',
     color: 'var(--dsw-alias-label-secondary)',
-    background: 'var(--dsw-alias-bg-layer-2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
     border: '1px solid var(--dsw-alias-border-l1)',
   },
   noticeDetail: {
