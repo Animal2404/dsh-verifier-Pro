@@ -38,7 +38,7 @@ llm-verifier 0.2.0 (official PyPI package)
 
 ## 安装
 
-需要 Node 18+、Python 3.10+、一个能返回 logprobs 的后端凭据。
+需要 Node 18+（engines 声明 `^22.19.0 || >=24`，实测兼容 18 起）、Python 3.10+、一个能返回 logprobs 的后端凭据。
 
 ### 一键安装（推荐）
 
@@ -86,8 +86,9 @@ bash scripts/build.sh
 > `deepseek-v4-pro`、`qwen3.8-max`。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
-`node scripts/probe_logprobs.py <model>` 可验证你的端点是否返回 logprobs；
-或用 `node .venv/Scripts/python scripts/scan_logprob_models.py <你的key>` 批量扫描候选模型。
+`.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>` 可验证你的端点是否返回 logprobs；
+或用 `.venv/Scripts/python scripts/scan_logprob_models.py <你的key>` 批量扫描候选模型
+（macOS/Linux 用 `.venv/bin/python`）。
 
 ## 使用
 
@@ -159,10 +160,10 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 ```yaml
 - insert:
     - id: verifier-brain
-      name: '@dsh-external/dsh-verifier-Pro'
+      name: '@dsh-external/dsh-verifier-pro'
       config:
         bridgeTimeoutMs: 300000
-        verifierModel: deepseek-v4-flash
+        verifierModel: deepseek-v4-pro
         maxWorkers: 4
         promptSection: true
 ```
@@ -177,9 +178,9 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxWorkers` | `4` | 桥内并发 worker |
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
-| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元），超额自动中断 |
-| `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），用于成本估算 |
-| `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算 |
+| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 实现预算拦截，当前为预留配置项（暂不生效）** |
+| `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），用于成本估算（预留） |
+| `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算（预留） |
 
 ## 版本钉扎指引
 

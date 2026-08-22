@@ -2,7 +2,7 @@
  * Offline unit tests for verifier-brain core primitives.
  * Zero-dependency: uses the built-in node:test runner (Node >= 18).
  * Run: node --test tests/
- * These import the COMPILED lib/ output â€?run `bash scripts/build.sh` first,
+ * These import the COMPILED lib/ output â€” run `bash scripts/build.sh` first,
  * or `npx tsc -p tsconfig.json` for a host-only build.
  */
 import { test } from 'node:test'
@@ -79,7 +79,7 @@ test('lru: evicts least-recently-used entry beyond capacity', () => {
   const cache = new LRUCache(2)
   cache.set('a', 1)
   cache.set('b', 2)
-  cache.get('a') // refresh a â†?b becomes LRU
+  cache.get('a') // refresh a â†’ b becomes LRU
   cache.set('c', 3) // must evict b
   assert.equal(cache.size, 2)
   assert.equal(cache.get('a'), 1)

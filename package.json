@@ -45,7 +45,7 @@
     "llm"
   ],
   "engines": {
-    "node": "^22.19.0 || >=24"
+    "node": ">=18"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc <2",

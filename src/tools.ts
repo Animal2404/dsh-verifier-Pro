@@ -39,6 +39,35 @@ const FLAT_EPSILON = 0.03
 /** Bridge payloads are JSON by protocol; satisfy the tool result contract. */
 const asToolResult = (value: unknown): Record<string, JsonValue> => value as Record<string, JsonValue>
 
+/**
+ * 传输层加固（v0.5.0 落地，替代早前 SECURITY.md 的虚构声明）。
+ *
+ * 诚实的覆盖范围：本插件无法修改 vendored 官方包的提示词构造，因此这里做
+ * **运输层防御**而非"提示词注入根治"——
+ *  1. 长度上限（10k，超出截断并标注）；
+ *  2. 剥离 JSONL 帧破坏字符（除 \n \t 外的 C0 控制符）——防止候选文本打断
+ *     stdio 协议行帧或注入不可见字符；
+ *  3. 对已知"指令劫持"短语做中性化替换（defense-in-depth，明确非完备）。
+ *
+ * 断言给 SECURITY.md 的措辞：这是运输层加固，不声称已消除提示词注入。
+ */
+const MAX_INPUT_LENGTH = 10_000
+const INJECTION_PHRASES: Array<[RegExp, string]> = [
+  [/\bignore\s+(all\s+)?previous\s+instructions?\b/gi, '[ignored phrase]'],
+  [/\bdisregard\s+(the\s+)?(above|prior|earlier)\s+instructions?\b/gi, '[ignored phrase]'],
+  [/\byou\s+are\s+now\s+(a|an|the)\b/gi, '[role claim]'],
+  [/\bsystem\s*:\s*$/gim, '[system marker]'],
+]
+
+function sanitizeForVerifier(text: string): string {
+  let out = text
+  if (out.length > MAX_INPUT_LENGTH) out = out.slice(0, MAX_INPUT_LENGTH) + '\n…[truncated]'
+  // 剥 C0 控制符（保留 \n \t）。
+  out = out.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+  for (const [re, replacement] of INJECTION_PHRASES) out = out.replace(re, replacement)
+  return out
+}
+
 function parseCriteria(raw: string | undefined): Criteria | undefined {
   if (raw === undefined || raw === '') return undefined
   const trimmed = raw.trim()
@@ -193,10 +222,14 @@ async function estimateCallMs(deps: EscalationDeps): Promise<number> {
 
 /** compare with adaptive escalation + manual slot alternation on even reps. */
 async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  // 传输层加固：候选/问题过 sanitize（长度上限 + 控制符剥离 + 注入短语中性化）。
+  const safeProblem = sanitizeForVerifier(p.problem)
+  const safeA = sanitizeForVerifier(p.candidate_a)
+  const safeB = sanitizeForVerifier(p.candidate_b)
   const mkParams = (swap: boolean): Record<string, unknown> => ({
-    problem: p.problem,
-    candidate_a: swap ? p.candidate_b : p.candidate_a,
-    candidate_b: swap ? p.candidate_a : p.candidate_b,
+    problem: safeProblem,
+    candidate_a: swap ? safeB : safeA,
+    candidate_b: swap ? safeA : safeB,
     ...(p.criteria !== undefined ? { criteria: p.criteria } : {}),
     ...(p.model ? { model: p.model } : {}),
     ...(p.n_evaluations !== undefined ? { n_evaluations: p.n_evaluations } : {}),
@@ -317,9 +350,12 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
 
 /** select with adaptive escalation (official tournament handles reps internally). */
 async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  // 传输层加固：问题与每个候选过 sanitize。
+  const safeProblem = sanitizeForVerifier(p.problem)
+  const safeCandidates = p.candidates.map((c) => sanitizeForVerifier(c))
   const mkParams = (nEval?: number): Record<string, unknown> => ({
-    problem: p.problem,
-    candidates: p.candidates,
+    problem: safeProblem,
+    candidates: safeCandidates,
     ...(p.criteria !== undefined ? { criteria: p.criteria } : {}),
     ...(p.model ? { model: p.model } : {}),
     ...(nEval !== undefined ? { n_evaluations: nEval } : {}),

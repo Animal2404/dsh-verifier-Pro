@@ -109,7 +109,7 @@ Smart input detection: plain text = goal (team mode); existing file paths = loca
 ```yaml
 - insert:
     - id: verifier-brain
-      name: '@dsh-external/dsh-verifier-Pro'
+      name: '@dsh-external/dsh-verifier-pro'
       config:
         bridgeTimeoutMs: 300000
         taskTimeoutMs: 1800000
