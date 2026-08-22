@@ -72,6 +72,31 @@ function extract(toolName: string, blockRaw: unknown): Extracted {
   return { action, data: null, isError, running }
 }
 
+/**
+ * 中文界面文案：动作名与状态徽章均以中文为主，英文原词保留为小字注释，
+ * 方便与 README/工具参数对照。映射缺失时回退英文原词。
+ */
+const ACTION_LABELS: Record<string, string> = {
+  select: '择优评选',
+  compare: '对比评审',
+  track: '轨迹打分',
+  progress_start: '进度追踪 · 开始',
+  progress_update: '进度追踪 · 更新',
+  progress_close: '进度追踪 · 结束',
+  task_start: '异步任务 · 启动',
+  task_status: '异步任务 · 查询',
+  usage: '用量统计',
+  ping: '连通探测',
+}
+
+const BADGE_LABELS: Record<string, string> = {
+  ok: '正常',
+  degraded: '信号不可信',
+  flat: '无区分度',
+  unstable: '信号不稳',
+  error: '出错',
+}
+
 export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const { action, data, isError, running } = React.useMemo(
@@ -89,13 +114,15 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
   type Badge = { text: string; colorToken: string }
   const badge: Badge =
-    running ? { text: 'scoring…', colorToken: 'var(--dsw-alias-label-tertiary)' }
-    : isError ? { text: 'error', colorToken: 'var(--dsw-alias-state-error-primary)' }
-    : signal === 'degraded' ? { text: 'degraded', colorToken: 'var(--dsw-alias-state-error-primary)' }
-    : signal === 'flat' || signal === 'unstable' ? { text: signal, colorToken: 'var(--dsw-alias-state-warn-label)' }
-    : escalated ? { text: `escalated ×${String(data?.k_used ?? '?')}`, colorToken: 'var(--dsw-alias-brand-primary)' }
-    : data ? { text: 'ok', colorToken: 'var(--dsw-alias-state-success-primary)' }
-    : { text: action, colorToken: 'var(--dsw-alias-label-tertiary)' }
+    running ? { text: '评分中…', colorToken: 'var(--dsw-alias-label-tertiary)' }
+    : isError ? { text: BADGE_LABELS.error!, colorToken: 'var(--dsw-alias-state-error-primary)' }
+    : signal === 'degraded' ? { text: BADGE_LABELS.degraded!, colorToken: 'var(--dsw-alias-state-error-primary)' }
+    : signal === 'flat' || signal === 'unstable' ? { text: BADGE_LABELS[signal] ?? signal, colorToken: 'var(--dsw-alias-state-warn-label)' }
+    : escalated ? { text: `已升级复核 ×${String(data?.k_used ?? '?')}`, colorToken: 'var(--dsw-alias-brand-primary)' }
+    : data ? { text: BADGE_LABELS.ok!, colorToken: 'var(--dsw-alias-state-success-primary)' }
+    : { text: ACTION_LABELS[action] ?? action, colorToken: 'var(--dsw-alias-label-tertiary)' }
+
+  const actionLabel = ACTION_LABELS[action] ?? action
 
   return (
     <div
@@ -105,7 +132,10 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
       title={expanded ? '点击收起' : '点击展开原始 JSON'}
     >
       <div style={styles.row}>
-        <span style={styles.title}>🔍 verifier · {action}</span>
+        <span style={styles.title}>
+          🔍 {actionLabel}
+          <span style={styles.actionEn}> · {action}</span>
+        </span>
         <span style={{ ...styles.badge, color: badge.colorToken, borderColor: badge.colorToken }}>
           {badge.text}
         </span>
@@ -115,7 +145,7 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
         <div style={styles.scores}>
           {scores.map((s, i) => (
             <span key={i} style={i === index ? styles.scoreBest : styles.score}>
-              #{i + 1}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
+              方案{i + 1}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆 最优' : ''}
             </span>
           ))}
         </div>
@@ -123,8 +153,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && rewardA !== null && rewardB !== null && (
         <div style={styles.scores}>
-          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreBest : styles.score}>A: {rewardA.toFixed(3)}</span>
-          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreBest : styles.score}>B: {rewardB.toFixed(3)}</span>
+          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreBest : styles.score}>方案A: {rewardA.toFixed(3)}</span>
+          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreBest : styles.score}>方案B: {rewardB.toFixed(3)}</span>
         </div>
       )}
 
@@ -173,6 +203,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 'var(--dsw-font-s-strong-14-font-size, 14px)',
     fontWeight: 'var(--dsw-font-s-strong-14-font-weight, 600)',
     lineHeight: 'var(--dsw-font-s-strong-14-line-height, 1.5)',
+  },
+  actionEn: {
+    fontWeight: 'var(--dsw-font-xs-13-font-weight, 400)',
+    fontSize: 'var(--dsw-font-xxs-12-font-size, 12px)',
+    color: 'var(--dsw-alias-label-tertiary)',
   },
   badge: {
     fontFamily: 'var(--dsw-font-xxs-strong-12-font-family, inherit)',
