@@ -57,6 +57,9 @@ if [ -n "$INSTALL" ]; then
   link_pkg @deepseek-ai/dsh-tools "$NM/@deepseek-ai/dsh-tools"
   link_pkg @deepseek-ai/dsh-llm "$NM/@deepseek-ai/dsh-llm"
   link_pkg @deepseek-ai/dsh-system-prompt "$NM/@deepseek-ai/dsh-system-prompt"
+  if [ -d "$NM/@deepseek-ai/dsh-commands" ]; then
+    link_pkg @deepseek-ai/dsh-commands "$NM/@deepseek-ai/dsh-commands"
+  fi
   if [ -d "$NM/@types/node" ]; then link_pkg @types/node "$NM/@types/node"; fi
   STD_SCHEMA=$(find "$NM/.pnpm" -maxdepth 1 -type d -iname '@standard-schema+spec@*' 2>/dev/null | head -1 || true)
   if [ -z "$STD_SCHEMA" ] && [ -d "$NM/@standard-schema/spec" ]; then
@@ -79,6 +82,9 @@ else
   link_pkg @deepseek-ai/dsh-tools "$CHECKOUT/packages/core/tools"
   link_pkg @deepseek-ai/dsh-llm "$CHECKOUT/packages/llm/llm"
   link_pkg @deepseek-ai/dsh-system-prompt "$CHECKOUT/packages/core/system-prompt"
+  if [ -d "$CHECKOUT/packages/core/commands" ]; then
+    link_pkg @deepseek-ai/dsh-commands "$CHECKOUT/packages/core/commands"
+  fi
   link_pkg @types/node "$CHECKOUT/node_modules/@types/node"
   STD_SCHEMA=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -iname '@standard-schema+spec@*' 2>/dev/null | head -1 || true)
   if [ -n "$STD_SCHEMA" ]; then
@@ -112,4 +118,24 @@ fi
 
 echo "=== Compiling src -> lib ($TSC) ==="
 "$TSC" -p tsconfig.json
+
+echo "=== Compiling client bundle (tsdown) ==="
+TSDOWN=""
+if [ -x "node_modules/.bin/tsdown" ]; then TSDOWN="node_modules/.bin/tsdown"
+elif [ -f "node_modules/.bin/tsdown.cmd" ]; then TSDOWN="node_modules/.bin/tsdown.cmd"
+elif [ -n "${DSH_TSDOWN:-}" ] && [ -f "$DSH_TSDOWN" ]; then TSDOWN="$DSH_TSDOWN"
+else
+  # Bootstrap a local tsdown (devDependency).
+  npm install --no-save --no-audit --no-fund tsdown@latest >/dev/null 2>&1 || true
+  if [ -f "node_modules/.bin/tsdown.cmd" ]; then TSDOWN="node_modules/.bin/tsdown.cmd"
+  elif [ -x "node_modules/.bin/tsdown" ]; then TSDOWN="node_modules/.bin/tsdown"
+  fi
+fi
+if [ -z "$TSDOWN" ]; then
+  echo "build: tsdown not found (set DSH_TSDOWN or run: npm i -D tsdown)" >&2
+  exit 1
+fi
+
+"$TSDOWN" -c tsdown.config.ts
+
 echo "=== Build complete ==="

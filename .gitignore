@@ -5,4 +5,15 @@ build.log
 *.tsbuildinfo
 *.tgz
 tmp_articles/
-docs/
+package-lock.json
+
+# 内部审计报告不公开（含安全事件复盘细节）
+docs/*
+!docs/PROGRESS.md
+!docs/PLAN.md
+!docs/ROADMAP.md
+
+# 敏感残留与本地备份
+replacements.txt
+*.bak.*
+*.bak

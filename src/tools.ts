@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { existsSync, unlinkSync } from 'node:fs'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { LRUCache, Semaphore } from './concurrency.js'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
 import type {
@@ -44,7 +45,22 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(trimmed)
-      if (parsed && typeof parsed === 'object') return parsed as Record<string, string>
+      if (parsed && typeof parsed === 'object') {
+        const obj = parsed as Record<string, unknown>
+        // Check if it's a weight object (all values are numbers)
+        const values = Object.values(obj)
+        if (values.length > 0 && values.every(v => typeof v === 'number')) {
+          // Validate weights: non-negative and sum to 1.0 (±0.001)
+          const sum = values.reduce((acc, v) => acc + (v as number), 0)
+          if (values.some(v => (v as number) < 0)) {
+            throw new Error('criteria weights must be non-negative')
+          }
+          if (Math.abs(sum - 1.0) > 0.001) {
+            throw new Error(`criteria weights must sum to 1.0 (got ${sum.toFixed(3)})`)
+          }
+        }
+        return obj as Criteria
+      }
     } catch {
       // Fall through: send the raw string and let llm-verifier decide.
     }
@@ -52,8 +68,14 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
   return trimmed
 }
 
-/** In-process result cache: identical requests are free; k1 and escalated results coexist. */
-const resultCache = new Map<string, Promise<unknown>>()
+/**
+ * Bounded in-process result cache: identical requests are free; k1 and
+ * escalated results coexist. Replaces the former unbounded Map, which leaked
+ * memory in long-lived DSH sessions and served stale entries forever.
+ * Bounds: 500 entries / 30min TTL — enough to dedupe a full Best-of-N round,
+ * small enough that a leak is bounded.
+ */
+const resultCache = new LRUCache<string, Promise<unknown>>(500, 30 * 60_000)
 
 function cached<T>(key: string, request: () => Promise<T>): Promise<T> {
   const existing = resultCache.get(key)
@@ -116,12 +138,47 @@ const topGap = (scores: unknown): number => {
   return nums.length >= 2 ? nums[0] - nums[1] : NaN
 }
 
+/**
+ * P0-5 hardening: clamp a verifier reward into [0,1].
+ * A compromised/injected scoring model could emit e.g. 42.7 to force a win;
+ * downstream gates compare rewards, so out-of-range values must never leak
+ * through. Returns NaN unchanged (callers treat NaN as tie/degraded already);
+ * flags clamping via the returned marker so results can surface the anomaly.
+ */
+function clamp01(value: unknown): { value: number; clamped: boolean } {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return { value: NaN, clamped: false }
+  const c = Math.min(1, Math.max(0, n))
+  return { value: c, clamped: c !== n }
+}
+
 export interface EscalationDeps {
   getBridge: () => Promise<PythonBridge>
   store: VerifierStore
   esc: EscalationOptions
   /** Timeout budget for the current call context (sync or async task). */
   budgetMs: () => number
+  /**
+   * Bounds concurrent scoring calls into the Python bridge (P0-3 hardening).
+   * Without it, N parallel verifier tools fire N simultaneous tournament
+   * scorings → provider rate-limit storms + cost spikes. Undefined = unbounded.
+   */
+  scoringGate?: Semaphore
+}
+
+/**
+ * Bridge request under the scoring semaphore (when configured).
+ * All expensive select/compare/tournament calls must go through this.
+ */
+async function gatedRequest<T>(
+  deps: EscalationDeps,
+  method: string,
+  params: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const bridge = await deps.getBridge()
+  const exec = () => bridge.request<T>(method, params, deps.budgetMs(), signal)
+  return deps.scoringGate ? deps.scoringGate.run(exec, signal) : exec()
 }
 
 /** Median duration of recent scoring calls, from persisted history. */
@@ -135,7 +192,7 @@ async function estimateCallMs(deps: EscalationDeps): Promise<number> {
 }
 
 /** compare with adaptive escalation + manual slot alternation on even reps. */
-async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Record<string, unknown>> {
+async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const mkParams = (swap: boolean): Record<string, unknown> => ({
     problem: p.problem,
     candidate_a: swap ? p.candidate_b : p.candidate_a,
@@ -154,8 +211,17 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
-  const k1 = await cached(baseKey + ':k1', async () =>
-    (await deps.getBridge()).request<Record<string, unknown>>('compare', mkParams(false), deps.budgetMs())) as Record<string, unknown>
+  const k1 = await cached(baseKey + ':k1', () =>
+    gatedRequest<Record<string, unknown>>(deps, 'compare', mkParams(false), signal)) as Record<string, unknown>
+  // P0-5: clamp rewards into [0,1]; surface anomaly when clipping occurred.
+  const ca = clamp01(k1.reward_a)
+  const cb = clamp01(k1.reward_b)
+  if (ca.clamped || cb.clamped) {
+    k1.anomaly = 'reward_out_of_range'
+    k1.warning = `⚠️ 评分返回越界值已被裁剪到 [0,1]（raw reward_a=${String(k1.reward_a)}, raw reward_b=${String(k1.reward_b)}）—— 疑似评分模型异常或被注入，请人工复核。`
+  }
+  k1.reward_a = ca.value
+  k1.reward_b = cb.value
 
   const marginBefore = Math.abs(Number(k1.reward_a) - Number(k1.reward_b))
   // exact-flat 护栏（降本3）：双侧精确 0.5 是 tie 掩蔽批量失败的特征签名。
@@ -207,7 +273,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
   for (let i = 2; i <= 1 + extraReps; i++) {
     const swap = i % 2 === 0
     try {
-      let r = await (await deps.getBridge()).request<Record<string, unknown>>('compare', mkRepParams(swap), deps.budgetMs())
+      let r = await gatedRequest<Record<string, unknown>>(deps, 'compare', mkRepParams(swap), signal)
       if (swap) r = { reward_a: r.reward_b, reward_b: r.reward_a }
       reps.push(r)
     } catch (error) {
@@ -250,7 +316,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams): Promise<Recor
 }
 
 /** select with adaptive escalation (official tournament handles reps internally). */
-async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<string, unknown>> {
+async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const mkParams = (nEval?: number): Record<string, unknown> => ({
     problem: p.problem,
     candidates: p.candidates,
@@ -277,9 +343,19 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
-  const k1 = await cached(baseKey + ':k1', async () =>
-    (await deps.getBridge()).request<Record<string, unknown>>('select',
-      { ...mkParams(p.n_evaluations ?? 1), cache: selectCachePath }, deps.budgetMs())) as Record<string, unknown>
+  const k1 = await cached(baseKey + ':k1', () =>
+    gatedRequest<Record<string, unknown>>(deps, 'select',
+      { ...mkParams(p.n_evaluations ?? 1), cache: selectCachePath }, signal)) as Record<string, unknown>
+  // P0-5: clamp all candidate scores into [0,1]; flag anomaly on clipping.
+  if (Array.isArray(k1.scores)) {
+    const rawScores = k1.scores as unknown[]
+    const clamped = rawScores.map((s) => clamp01(s))
+    if (clamped.some((c) => c.clamped)) {
+      k1.anomaly = 'score_out_of_range'
+      k1.warning = `⚠️ 部分候选评分越界，已裁剪到 [0,1]（raw: ${JSON.stringify(rawScores)}）—— 疑似评分模型异常或被注入，请人工复核。`
+    }
+    k1.scores = clamped.map((c) => c.value)
+  }
 
   // exact-flat 护栏（降本3，审计二修正版）：全分量精确 =0.5 有两种成因——
   //   a) on_error="tie" 掩蔽批量失败（候选互不相同 → 可疑 → degraded）
@@ -331,8 +407,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams): Promise<Record<
     const escCachePath = escModel === p.model
       ? selectCachePath
       : join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
-    escalated = await (await deps.getBridge()).request<Record<string, unknown>>('select',
-      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, deps.budgetMs())
+    escalated = await gatedRequest<Record<string, unknown>>(deps, 'select',
+      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
   } catch (error) {
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
@@ -400,7 +476,7 @@ export function createEscalationRunner(deps: EscalationDeps) {
         max_workers: params.max_workers as number | undefined,
       })
     }
-    return (await deps.getBridge()).request(method, params)
+    return gatedRequest(deps, method, params)
   }
 }
 
@@ -482,10 +558,12 @@ export interface ToolsOptions {
   syncBudgetMs?: number
   /** Adaptive verification scaling options. */
   escalation?: EscalationOptions
+  /** Max concurrent scoring calls into the bridge (P0-3; default 4, mirrors maxWorkers). */
+  maxConcurrentScoring?: number
 }
 
 interface VerifierToolArgs {
-  action: 'select' | 'compare' | 'track' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status'
+  action: 'select' | 'compare' | 'track' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
   problem?: string
   candidates?: string[]
   candidate_a?: string
@@ -554,6 +632,8 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
 export function registerVerifierTools(ctx: Context, options: ToolsOptions): void {
   const { getBridge, store, tasks, defaultModel, taskTimeoutMs, syncBudgetMs, escalation } = options
   const withDefaultModel = (model?: string): string | undefined => model ?? defaultModel
+  // P0-3 hardening: bound concurrent scoring calls (default mirrors maxWorkers=4).
+  const scoringGate = new Semaphore(options.maxConcurrentScoring ?? 4)
   const deps: EscalationDeps = {
     getBridge,
     store,
@@ -563,6 +643,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       maxEscalateK: escalation?.maxEscalateK ?? 3,
     },
     budgetMs: () => syncBudgetMs ?? 300_000,
+    scoringGate,
   }
 
   ctx.effect(() => {
@@ -573,7 +654,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       parameters: {
         action: {
           type: 'string',
-          enum: ['select', 'compare', 'track', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status'],
+          enum: ['select', 'compare', 'track', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
           required: true,
           description: 'What to do.',
         },
@@ -601,9 +682,10 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         schema: LOOSE_OBJECT_SCHEMA,
         render: (_args: unknown, value: Record<string, unknown>) => [renderResult(value)],
       },
-      async execute(args: VerifierToolArgs): Promise<Record<string, JsonValue>> {
+      async execute(args: VerifierToolArgs, context?: { signal?: AbortSignal }): Promise<Record<string, JsonValue>> {
         const bridge = await getBridge()
         const model = withDefaultModel(args.model)
+        const signal = context?.signal
         switch (args.action) {
           case 'select': {
             if (!args.problem) throw new Error('verifier select requires `problem`')
@@ -620,7 +702,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               images: args.images,
               seed: args.seed,
               max_workers: args.max_workers,
-            })
+            }, signal)
             return asToolResult(result)
           }
           case 'compare': {
@@ -637,7 +719,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               model,
               n_evaluations: args.n_evaluations,
               images: args.images,
-            })
+            }, signal)
             return asToolResult(result)
           }
           case 'track': {
@@ -650,7 +732,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               ...(args.checkpoint_steps !== undefined ? { checkpoint_steps: args.checkpoint_steps } : {}),
               ...(model ? { model } : {}),
               ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
-            })
+            }, undefined, signal)
             store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: args.problem, model, scores: result.scores, duration_ms: Date.now() - started })
             return asToolResult(result)
           }
@@ -660,7 +742,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               problem: args.problem,
               ...(model ? { model } : {}),
               ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
-            })
+            }, undefined, signal)
             store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', problem: args.problem, model, tracker_id: result.tracker_id as string, scores: [] })
             return asToolResult(result)
           }
@@ -670,13 +752,13 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             const result = await bridge.request<Record<string, unknown>>('progress_update', {
               tracker_id: args.tracker_id,
               step: args.step,
-            })
+            }, undefined, signal)
             store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', tracker_id: args.tracker_id, step: args.step, model, scores: [result.score] })
             return asToolResult(result)
           }
           case 'progress_close': {
             if (!args.tracker_id) throw new Error('verifier progress_close requires `tracker_id`')
-            return asToolResult(await bridge.request<Record<string, unknown>>('progress_close', { tracker_id: args.tracker_id }))
+            return asToolResult(await bridge.request<Record<string, unknown>>('progress_close', { tracker_id: args.tracker_id }, undefined, signal))
           }
           case 'task_start': {
             let params: Record<string, unknown>
@@ -700,6 +782,10 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             if (!args.task_id) throw new Error('verifier task_status requires `task_id`')
             const wait = Number(args.wait_seconds ?? 0)
             return asToolResult(await tasks.statusWait(String(args.task_id), Number.isFinite(wait) ? wait : 0))
+          }
+          case 'usage': {
+            const result = await bridge.request<Record<string, unknown>>('usage', {}, undefined, signal)
+            return asToolResult(result)
           }
         }
       },

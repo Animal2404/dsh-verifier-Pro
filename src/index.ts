@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { PythonBridge } from './bridge.js'
+import { PythonBridge, type ProbeResult } from './bridge.js'
 import { buildBridgeEnv } from './credentials.js'
 import { VerifierStore } from './persist.js'
 import { verifierUsageSection, bestOfNProtocolSection } from './prompt.js'
@@ -66,6 +66,12 @@ export interface Config {
    * close-margin cases that need it. Unset = same as verifierModel.
    */
   escalationModel?: string
+  /** Max cost in USD per verification task (default: no limit). */
+  maxCostPerVerification?: number
+  /** Cost per 1K input tokens in USD (for cost estimation). */
+  costPer1kInputTokens?: number
+  /** Cost per 1K output tokens in USD (for cost estimation). */
+  costPer1kOutputTokens?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -83,6 +89,9 @@ export const Config: z<Config> = z.object({
   escalateThreshold: z.number().default(0.15),
   maxEscalateK: z.natural().default(3),
   escalationModel: z.string(),
+  maxCostPerVerification: z.number().min(0),
+  costPer1kInputTokens: z.number().min(0),
+  costPer1kOutputTokens: z.number().min(0),
 })
 
 /** Plugin root (the directory containing package.json / bridge/). */
@@ -114,6 +123,9 @@ export function apply(ctx: Context, config: Config): void {
     ...(config.backendBaseUrl ? { OPENAI_BASE_URL: config.backendBaseUrl } : {}),
     ...(config.backendApiKey ? { OPENAI_API_KEY: config.backendApiKey } : {}),
   })
+  let probeResult: ProbeResult | null = null
+  let probePromise: Promise<void> | null = null
+
   const getBridge = async (): Promise<PythonBridge> => {
     if (!bridge) {
       bridge = new PythonBridge(
@@ -123,6 +135,24 @@ export function apply(ctx: Context, config: Config): void {
         env,
         (reason) => ctx.logger.warn('verifier-brain: bridge restarted (%s)', reason),
       )
+      // Probe on first bridge creation
+      if (!probePromise) {
+        probePromise = (async () => {
+          try {
+            const result = await bridge.probe()
+            probeResult = result
+            ctx.logger.info('verifier-brain: probe result: model=%s, base_url=%s, logprobs=%s%s',
+              result.model, result.base_url, result.logprobs_supported ? 'supported' : 'NOT SUPPORTED',
+              result.logprobs_error ? ` (error: ${result.logprobs_error})` : '')
+            if (!result.logprobs_supported) {
+              ctx.logger.warn('verifier-brain: logprobs NOT supported by current backend — scoring will fail or degrade. Check model/backend config.')
+            }
+          } catch (e) {
+            ctx.logger.warn('verifier-brain: probe failed: %s', e instanceof Error ? e.message : String(e))
+            probeResult = { model: 'unknown', base_url: 'unknown', logprobs_supported: false, logprobs_error: String(e), llm_verifier_version: 'unknown' }
+          }
+        })()
+      }
     }
     return bridge
   }
@@ -148,6 +178,7 @@ export function apply(ctx: Context, config: Config): void {
     taskTimeoutMs: config.taskTimeoutMs ?? 1_800_000,
     syncBudgetMs: config.bridgeTimeoutMs ?? 300_000,
     escalation,
+    maxConcurrentScoring: config.maxWorkers ?? 4,
   })
 
   // M4-B: /bestofn command (lazily when the commands registry is mounted)

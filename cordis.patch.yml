@@ -20,9 +20,9 @@
         # 2026-08-22: deepseek-v4-flash 被 Open Code 上游 DFLASH 投机解码禁用
         # logprobs 返回（400 "does not support return_logprob"），切换到实测
         # 支持 logprobs 的 deepseek-v4-pro（三份独立调查报告实测矩阵一致）。
-        verifierModel: deepseek-v4-pro
+        verifierModel: deepseek-chat
         # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
-        backendBaseUrl: https://opencode.ai/zen/go/v1
+        backendBaseUrl: https://api.deepseek.com
         # Concurrent workers inside the Python bridge.
         maxWorkers: 4
         # Register the verifier usage policy into the global system prompt.
@@ -32,3 +32,9 @@
         autoEscalate: true
         escalateThreshold: 0.15
         maxEscalateK: 3
+
+# Client-side plugin for Web UI (Verifier panel + settings)
+- insert:
+    - id: verifier-brain-client
+      name: '@dsh-external/dsh-verifier-pro'
+      client: true

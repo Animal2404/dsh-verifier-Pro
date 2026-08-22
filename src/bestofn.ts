@@ -32,20 +32,57 @@ interface BestOfNResult {
   note?: string
 }
 
-/** Run evidence_chain.mjs as a subprocess; returns its exit code + stdout. */
-function runEvidenceChain(artifacts: string[], summaries: Map<string, string>, outDir: string): Promise<{ code: number; stdout: string }> {
+/**
+ * Run evidence_chain.mjs as a subprocess; returns its exit code + stdout.
+ * P0-4 hardening: hard timeout (default 10min) with SIGTERM→SIGKILL escalation
+ * so a hung CDP/browser smoke can no longer wedge the /bestofn command forever.
+ */
+function runEvidenceChain(
+  artifacts: string[],
+  summaries: Map<string, string>,
+  outDir: string,
+  timeoutMs = 10 * 60_000,
+): Promise<{ code: number; stdout: string }> {
   return new Promise((resolvePromise) => {
     const args = [...artifacts, '--out', outDir]
     for (const [name, text] of summaries) args.push('--summary', `${name}=${text}`)
-    const child = spawn(process.execPath, [join(pluginRoot, 'scripts', 'evidence_chain.mjs'), ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(process.execPath, [join(pluginRoot, 'scripts', 'evidence_chain.mjs'), ...args], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (e) {
+      resolvePromise({ code: 1, stdout: `evidence_chain spawn error: ${e instanceof Error ? e.message : String(e)}` })
+      return
+    }
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (d) => { stdout += d.toString() })
-    child.stderr.on('data', (d) => { stderr += d.toString() })
-    child.on('close', (code) => resolvePromise({ code: code ?? 1, stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') }))
-    child.on('error', (e) => resolvePromise({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` }))
+    let settled = false
+    const finish = (result: { code: number; stdout: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(killer)
+      resolvePromise(result)
+    }
+    // Hard timeout: SIGTERM first (graceful), SIGKILL 5s later (stubborn).
+    const killer = setTimeout(() => {
+      if (!settled && child.pid) {
+        try { child.kill('SIGTERM') } catch { /* already dead */ }
+        setTimeout(() => {
+          if (!settled && child.pid) {
+            try { child.kill('SIGKILL') } catch { /* already dead */ }
+          }
+        }, 5_000).unref()
+      }
+    }, timeoutMs)
+    killer.unref()
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
+    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+    child.on('close', (code, signal) => {
+      const timedOutNote = signal ? `\n[evidence_chain killed by signal=${signal} after ${timeoutMs}ms timeout]` : ''
+      finish({ code: code ?? (signal ? 124 : 1), stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + timedOutNote })
+    })
+    child.on('error', (e) => finish({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` }))
   })
 }
 

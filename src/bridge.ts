@@ -12,6 +12,14 @@ import { createInterface, type Interface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import type { BridgeErrorResponse, BridgeResponse } from './types.js'
 
+export interface ProbeResult {
+  model: string
+  base_url: string
+  logprobs_supported: boolean
+  logprobs_error: string | null
+  llm_verifier_version: string
+}
+
 export class BridgeError extends Error {
   readonly type: string
 
@@ -26,6 +34,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
   timer: NodeJS.Timeout
+  abortHandler?: () => void
 }
 
 export class PythonBridge {
@@ -91,11 +100,11 @@ export class PythonBridge {
     this.lines.on('line', (line) => this.handleLine(line))
   }
 
-  async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+  async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     // Retry once if the bridge died between requests (crash auto-restart).
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return await this.requestOnce<T>(method, params, timeoutMs)
+        return await this.requestOnce<T>(method, params, timeoutMs, signal)
       } catch (error) {
         const recoverable = error instanceof BridgeError
           && (error.type === 'PythonBridgeExit' || error.type === 'BridgeWriteError' || error.type === 'BridgeClosed')
@@ -105,7 +114,7 @@ export class PythonBridge {
     throw new BridgeError('PythonBridgeError', 'unreachable') // appease the compiler
   }
 
-  private requestOnce<T>(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  private requestOnce<T>(method: string, params: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     this.start()
     const id = String(++this.seq)
     const payload = JSON.stringify({ id, method, params })
@@ -119,11 +128,35 @@ export class PythonBridge {
         reject(new BridgeError('BridgeTimeout', `python bridge timed out after ${budget}ms (method=${method})`))
       }, budget)
 
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer })
+      const pending: PendingRequest = {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      }
+
+      // Handle AbortSignal
+      let abortHandler: (() => void) | undefined
+      if (signal) {
+        abortHandler = () => {
+          this.pending.delete(id)
+          clearTimeout(timer)
+          reject(new BridgeError('BridgeAborted', 'request aborted by caller'))
+        }
+        signal.addEventListener('abort', abortHandler)
+        // Handle case where signal is already aborted
+        if (signal.aborted) {
+          abortHandler()
+          return
+        }
+      }
+      pending.abortHandler = abortHandler
+
+      this.pending.set(id, pending)
 
       if (!this.child?.stdin.writable) {
         this.pending.delete(id)
         clearTimeout(timer)
+        if (abortHandler && signal) signal.removeEventListener('abort', abortHandler)
         reject(new BridgeError('BridgeWriteError', 'python bridge stdin is not writable'))
         return
       }
@@ -131,10 +164,15 @@ export class PythonBridge {
         if (error) {
           this.pending.delete(id)
           clearTimeout(timer)
+          if (abortHandler && signal) signal.removeEventListener('abort', abortHandler)
           reject(new BridgeError('BridgeWriteError', `failed to write to python bridge: ${error.message}`))
         }
       })
     })
+  }
+
+  async probe(signal?: AbortSignal): Promise<ProbeResult> {
+    return this.request<ProbeResult>('probe', {}, 30_000, signal)
   }
 
   close(): void {

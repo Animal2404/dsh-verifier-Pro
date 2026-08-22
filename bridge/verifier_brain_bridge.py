@@ -336,6 +336,63 @@ def _handle_usage(params: dict[str, Any]) -> dict[str, Any]:
     return {"usage": _jsonable(token_usage()) if callable(token_usage) else None}
 
 
+def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
+    """Probe the verifier backend for logprobs support and model info."""
+    _ = params
+    _require_library()
+    
+    try:
+        client = _get_client()
+        # Make a minimal compare call to test logprobs
+        # Use a trivial problem to minimize cost
+        test_problem = "test"
+        candidate_a = "a"
+        candidate_b = "b"
+        criteria = {"Test": "test"}
+        
+        # Try to get the client's model info
+        model = getattr(client, "model", None) or os.environ.get("OPENAI_MODEL", "unknown")
+        base_url = getattr(client, "base_url", None) or os.environ.get("OPENAI_BASE_URL", "unknown")
+        
+        # Test logprobs with a minimal compare call
+        logprobs_supported = False
+        logprobs_error = None
+        try:
+            # Use minimal params to test logprobs
+            reward_a, reward_b = llm_verifier.compare(
+                test_problem, candidate_a, candidate_b,
+                criteria=criteria,
+                n_evaluations=1,
+                client=client
+            )
+            # If we get numeric rewards without error, logprobs likely worked
+            logprobs_supported = isinstance(reward_a, (int, float)) and isinstance(reward_b, (int, float))
+        except Exception as e:
+            logprobs_error = str(e)
+            # Check if error indicates missing logprobs
+            if "logprob" in str(e).lower() or "does not support" in str(e).lower():
+                logprobs_supported = False
+            else:
+                # Other error, assume logprobs might work
+                logprobs_supported = True
+        
+        return {
+            "model": model,
+            "base_url": base_url,
+            "logprobs_supported": logprobs_supported,
+            "logprobs_error": logprobs_error,
+            "llm_verifier_version": getattr(llm_verifier, "__version__", "unknown"),
+        }
+    except Exception as e:
+        return {
+            "model": "unknown",
+            "base_url": "unknown",
+            "logprobs_supported": False,
+            "logprobs_error": f"Probe failed: {str(e)}",
+            "llm_verifier_version": getattr(llm_verifier, "__version__", "unknown") if llm_verifier else "not installed",
+        }
+
+
 _HANDLERS: dict[str, Any] = {
     "ping": _handle_ping,
     "select": _handle_select,
@@ -345,6 +402,7 @@ _HANDLERS: dict[str, Any] = {
     "progress_update": _handle_progress_update,
     "progress_close": _handle_progress_close,
     "usage": _handle_usage,
+    "probe": _handle_probe,
 }
 
 

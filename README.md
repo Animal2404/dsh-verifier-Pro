@@ -177,6 +177,39 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxWorkers` | `4` | 桥内并发 worker |
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
+| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元），超额自动中断 |
+| `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），用于成本估算 |
+| `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算 |
+
+## 版本钉扎指引
+
+为避免 `dsh plugin add github:Animal2404/dsh-verifier-Pro` 拉取最新 main 分支导致不兼容变更，**强烈建议使用 commit hash 钉扎版本**：
+
+```sh
+# 钉扎到特定 commit（推荐）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro#a1b2c3d
+
+# 或钉扎到 tag（如 v0.4.2）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
+```
+
+> ⚠️ 不加 `#commit` 或 `#tag` 将始终拉取最新 main，可能引入破坏性变更。
+
+### 权重校验
+
+`criteria` 参数支持传入权重对象，权重值必须为非负数且总和为 1.0（误差容忍 0.001）：
+
+```json
+{
+  "Correctness": 0.5,
+  "Completeness": 0.3,
+  "Clarity": 0.2
+}
+```
+
+- 权重总和不为 1.0 时，工具会报错拒绝执行
+- 权重为负数时会报错
+- 未指定权重时默认均分（兼容旧用法）
 
 ## 参考项目
 

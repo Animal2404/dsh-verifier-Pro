@@ -583,6 +583,52 @@ function recommendSnippet(backend) {
   return [`verifierModel: ${backend.model}`, `backendBaseUrl: ${backend.baseUrl}`];
 }
 
+/**
+ * 自动写入 cordis.patch.yml 的 verifierModel / backendBaseUrl（带备份）。
+ * 返回 { written: boolean, backupPath?: string, error?: string }。
+ */
+function writePatchConfig(root, backend) {
+  const patchPath = path.join(root, 'cordis.patch.yml');
+  const text = readTextSafe(patchPath);
+  if (text == null) return { written: false, error: 'cordis.patch.yml 不存在' };
+
+  // 备份
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${patchPath}.bak.${timestamp}`;
+  try {
+    fs.copyFileSync(patchPath, backupPath);
+  } catch (e) {
+    return { written: false, error: `备份失败：${e.message}` };
+  }
+
+  // 替换 verifierModel 和 backendBaseUrl
+  let newText = text;
+  const lines = newText.split('\n');
+  let vmReplaced = false;
+  let bbReplaced = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^[ \t]*verifierModel[ \t]*:/.test(line)) {
+      lines[i] = line.replace(/^([ \t]*verifierModel[ \t]*:[ \t]*).+$/, `$1${backend.model}`);
+      vmReplaced = true;
+    } else if (/^[ \t]*backendBaseUrl[ \t]*:/.test(line)) {
+      lines[i] = line.replace(/^([ \t]*backendBaseUrl[ \t]*:[ \t]*).+$/, `$1${backend.baseUrl}`);
+      bbReplaced = true;
+    }
+  }
+  newText = lines.join('\n');
+
+  try {
+    fs.writeFileSync(patchPath, newText, 'utf8');
+  } catch (e) {
+    // 恢复备份
+    try { fs.copyFileSync(backupPath, patchPath); } catch {}
+    return { written: false, error: `写入失败：${e.message}` };
+  }
+
+  return { written: true, backupPath, vmReplaced, bbReplaced };
+}
+
 /** 【嫁接 B2】从 cordis.patch.yml 抓取当前硬编码的 verifierModel / backendBaseUrl 值。 */
 function readCurrentPatchConfig(root) {
   const p = path.join(root, 'cordis.patch.yml');
@@ -939,6 +985,29 @@ function runFix(root) {
     if (venv.pkgError) console.log(indentBlock(venv.pkgError));
   }
 
+  // ---------- 步骤 ③.5：自动写入 cordis.patch.yml 推荐配置 ----------
+  console.log('');
+  console.log(bold('【步骤 3.5/4】自动写入推荐评分后端配置'));
+  const credsForPatch = gatherCredentials();
+  let patchWritten = false;
+  let patchBackup = '';
+  if (credsForPatch.found.length > 0) {
+    const primary = credsForPatch.found[0];
+    const result = writePatchConfig(root, primary);
+    if (result.written) {
+      patchWritten = true;
+      patchBackup = result.backupPath;
+      console.log(`  ${MARK_OK} 已自动更新 cordis.patch.yml：`);
+      console.log(`      verifierModel:  ${primary.model}`);
+      console.log(`      backendBaseUrl: ${primary.baseUrl}`);
+      console.log(`      ${gray('备份：')} ${path.basename(result.backupPath)}`);
+    } else {
+      console.log(`  ${MARK_WARN} 自动更新失败：${result.error}，需手动修改`);
+    }
+  } else {
+    console.log(`  ${MARK_WARN} 无可用凭据，跳过自动更新（需手动配置后再运行 --fix）`);
+  }
+
   // ---------- 步骤 ④：剩余手动事项 ----------
   console.log('');
   console.log(bold('【步骤 4/4】需要你手动确认的事项'));
@@ -957,9 +1026,9 @@ function runFix(root) {
   for (const line of renderCredentialSection(creds, root, '      ')) {
     console.log(`  ${line}`);
   }
-  if (creds.found.length > 0) {
+  if (creds.found.length > 0 && !patchWritten) {
     manual.push('把推荐的 verifierModel/backendBaseUrl 写入 cordis.patch.yml（替换作者环境的硬编码值）');
-  } else {
+  } else if (creds.found.length === 0) {
     manual.push('申请并配置至少一个评分后端凭据（见上方渠道）');
   }
 
