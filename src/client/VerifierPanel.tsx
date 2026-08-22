@@ -118,9 +118,15 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     : isError ? { text: BADGE_LABELS.error!, colorToken: 'var(--dsw-alias-state-error-primary)' }
     : signal === 'degraded' ? { text: BADGE_LABELS.degraded!, colorToken: 'var(--dsw-alias-state-error-primary)' }
     : signal === 'flat' || signal === 'unstable' ? { text: BADGE_LABELS[signal] ?? signal, colorToken: 'var(--dsw-alias-state-warn-label)' }
-    : escalated ? { text: `已升级复核 ×${String(data?.k_used ?? '?')}`, colorToken: 'var(--dsw-alias-brand-primary)' }
+    : escalated ? { text: `分差小 · 已评${String(data?.k_used ?? '?')}次`, colorToken: 'var(--dsw-alias-brand-primary)' }
     : data ? { text: BADGE_LABELS.ok!, colorToken: 'var(--dsw-alias-state-success-primary)' }
     : { text: ACTION_LABELS[action] ?? action, colorToken: 'var(--dsw-alias-label-tertiary)' }
+
+  // 大白话解释：为什么会出现"分差小 · 已评N次"——单次评分有偶然性，接近时
+  // 自动多评几次（每次交换 A/B 顺序消除偏向）再取平均，结果更可靠。
+  const escalateNote = escalated
+    ? `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`
+    : null
 
   const actionLabel = ACTION_LABELS[action] ?? action
 
@@ -160,6 +166,10 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && typeof data?.warning === 'string' && (
         <div style={styles.warning}>{data.warning}</div>
+      )}
+
+      {!running && escalateNote && (
+        <div style={styles.note}>💡 {escalateNote}</div>
       )}
 
       {expanded && (
@@ -232,6 +242,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-state-warn-label)',
     background: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent)',
     border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, transparent)',
+  },
+  note: {
+    marginTop: 6,
+    padding: '4px 8px',
+    borderRadius: 4,
+    fontSize: 'var(--dsw-font-xs-13-font-size, 13px)',
+    lineHeight: 'var(--dsw-font-xs-13-line-height, 1.5)',
+    color: 'var(--dsw-alias-label-secondary)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    border: '1px solid var(--dsw-alias-border-l1)',
   },
   pre: {
     marginTop: 6,
