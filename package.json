@@ -24,6 +24,8 @@
     "scripts/bestofn-usage.cjs",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "license": "BSD-3-Clause",
