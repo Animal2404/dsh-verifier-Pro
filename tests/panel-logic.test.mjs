@@ -114,3 +114,27 @@ test('evaluate_session：评分导出显示 checkpoint/均分/趋势（不再空
   assert.match(p.summaryLine ?? '', /0\.6/, '含均分')
   assert.match(p.summaryLine ?? '', /\+0\.6/, '含趋势')
 })
+
+// 非评分动作：task_start/progress_start/progress_close/usage/无结果的 task_status
+// 不产生 LLM 判断——VAL 行应为 null（卡片不渲染「验证锚定: L0」）。
+test('非评分动作：task_start/progress_start/progress_close/usage 无 VAL 标注', () => {
+  const cases = [
+    { action: 'task_start', task_id: 't1', status: 'running' },
+    { action: 'progress_start', tracker_id: 'tr1' },
+    { action: 'progress_close', closed: true },
+    { action: 'usage', usage: { calls: 1, input_tokens: 10 } },
+    { action: 'task_status', task_id: 't1', status: 'running' },
+  ]
+  for (const data of cases) {
+    const p = deriveOf(data)
+    assert.equal(p.valLevel, null, `${data.action} 不应有 VAL 等级`)
+    assert.equal(p.valNote, null, `${data.action} 不应渲染 VAL 行`)
+  }
+})
+
+test('评分动作：progress_update 与有结果的 task_status 保留 VAL L0', () => {
+  const pu = deriveOf({ action: 'progress_update', score: 0.5 })
+  assert.equal(pu.valLevel, 'L0', 'progress_update 有进度分 → L0')
+  const ts = deriveOf({ action: 'task_status', task_id: 't1', status: 'done', scores: [0.6, 0.4], index: 0 })
+  assert.equal(ts.valLevel, 'L0', 'task_status 带评分结果 → L0')
+})

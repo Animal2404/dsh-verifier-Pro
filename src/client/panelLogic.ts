@@ -60,9 +60,10 @@ export interface PanelState {
   stateKey: PanelStateKey
   badgeText: string
   isWarn: boolean
-  /** VAL 验证自主等级：L0=LLM 判断 / L1=确定性规则介入。 */
-  valLevel: 'L0' | 'L1'
-  valNote: string
+  /** VAL 验证自主等级：L0=LLM 判断 / L1=确定性规则介入；非评分动作（任务/追踪器
+   *  确认、统计）无 LLM 判断，为 null 且不渲染 VAL 行。 */
+  valLevel: 'L0' | 'L1' | null
+  valNote: string | null
   /** literal-mc 采样近似分提示（无则 null）。 */
   mcNote: string | null
   /** 说明卡文案（无则 null）。 */
@@ -120,9 +121,18 @@ export function derivePanelState(
     ? `🎲 采样近似分：模型不返回 logprobs，本分是 ${String(data?.k_used ?? data?.n_evaluations ?? '多次')} 次评分标签采样平均——方向可信，精细分差请用 logprobs 模型复核。`
     : null
 
-  // VAL：L0=LLM 判断 / L1=确定性规则介入（clamp/护栏/anomaly/exact-flat=degraded）
-  const valLevel: 'L0' | 'L1' = (hasAnomaly || stateKey === 'degraded') ? 'L1' : 'L0'
-  const valNote = `验证锚定: ${valLevel}（${valLevel === 'L1' ? '确定性规则介入——机器规则已生效' : 'LLM 判断——无外部锚定，仅供参考'}）`
+  // VAL：L0=LLM 判断 / L1=确定性规则介入（clamp/护栏/anomaly/exact-flat=degraded）。
+  // 非评分动作（task_start/progress_start/progress_close/usage、无结果的
+  // task_status）不产生 LLM 判断——valNote 置 null，卡片不渲染 VAL 行。
+  const scoringActions = new Set(['select', 'compare', 'track', 'decompose', 'evaluate_session', 'progress_update'])
+  const isScoring = scoringActions.has(action)
+    || (action === 'task_status' && data !== null && (Array.isArray(data.scores) || data.reward_a !== undefined || data.index !== undefined))
+  const valLevel: 'L0' | 'L1' | null = !isScoring
+    ? null
+    : ((hasAnomaly || stateKey === 'degraded') ? 'L1' : 'L0')
+  const valNote = valLevel === null
+    ? null
+    : `验证锚定: ${valLevel}（${valLevel === 'L1' ? '确定性规则介入——机器规则已生效' : 'LLM 判断——无外部锚定，仅供参考'}）`
 
   const noticeText = STATE_NOTES[stateKey]
     ?? (hasAnomaly
