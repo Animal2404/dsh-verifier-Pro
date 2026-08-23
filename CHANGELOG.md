@@ -2,6 +2,25 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.6.1] - 2026-08-24
+
+### Fixed
+- **档案表自愈（#1）**：literal-mc 评分响应被动观测 `<score_X>` 标签——连续 3 次无标签即标记模型 DEGRADED，评分 fail-closed 拒绝（不再静默错评）；probe 做 live 复核可自愈恢复。此前 MODEL_PROFILES 写死，上游格式漂移会静默失配。
+- **decompose 偶发空响应（#3）**：根因 = 请求未禁用 thinking，隐藏推理吃掉 4096 预算致中文长 JSON 截断/空响应。修：thinking disabled + max_tokens 8192 + 空响应重试 + 括号栈 JSON 截断修复（替代粗暴 `}`*3）。
+- **select/compare 结果带真实耗时（#4）**：`duration_ms` 透传，面板/输出显示 `⏱ Ns`；大候选数（≥8）提示走异步 task_start。
+- **literal-mc 成本/置信提示（#6）**：采样路径结果自动标注 `literal-mc（默认 K=5 次调用）`；临界分差（<0.15）时警告建议 logprobs 模型复核（含 unstable 分支）。
+- **面板 VAL 语义**：非评分动作（task_start/progress_start/progress_close/usage/无结果 task_status）不再误标「LLM 判断」。
+- **面板内容显示**：progress/task/usage 卡片显示实际内容（进度分、tracker id、任务状态/结果、用量统计）——此前是空白「正常」卡。
+- **卡片中文标题**：全部 action 标题使用中文（进度追踪 · 更新 等），此前是英文原名。
+
+### Changed
+- **CI 全量测试（#2）**：harness 依赖的 tools.ts/bestofn 测试（此前只本地跑）搬进公开 CI。根因排查：DSH npm 发布残缺（dsh-tools@0.0.1-rc.1 依赖不存在的 dsh-type-meta），但 host 运行时只需 3 个 registry 可装的包（dsh-tools@0.1.1-rc.2 + cordis@4.0.0-rc.8 + schemastery）→ pnpm 装 + `tsc --noCheck` 转译 → 全量 55+ 项测试进 CI（core/bridge/harness 三 job）。
+- **默认模型判别力 A/B 结论（#5）**：flash-vision-exp 与 v4-pro 在粗/细/中文三任务上方向判定一致且正确，reason-first 已修复早期 flat 问题——默认模型无需更换。
+- RELEASING.md / github-push 技能升级 v2（CI 闸门、版本三处一致、tgz 完整性、stable 策略、发布后验证）。
+
+### Removed
+- 仓库清理（`1eb2ab1`）：删除 6 个无关/一次性脚本（含 mario 游戏调试脚本）、修复 .gitignore `__pycache` typo、清理 tmp_articles。
+
 ## [0.6.0] - 2026-08-23
 
 ### Added
