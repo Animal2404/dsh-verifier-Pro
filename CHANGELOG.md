@@ -2,7 +2,7 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased] — v0.5.0 之后（将并入 0.6.0）
+## [0.6.0] - 2026-08-23
 
 ### Added
 - **P1-② VAL 验证锚定**：面板与 /bestofn 报告标注验证自主等级（L0 LLM 判断 / L1 规则介入 / L2 客观证据）
