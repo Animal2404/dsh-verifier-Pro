@@ -144,8 +144,9 @@ export function derivePanelState(
       ? data.message
       : null
 
-  // 结构化 action 摘要行：decompose（诊断）与 evaluate_session（评分导出）
-  // 不产生 reward_a/b，面板应显示其结构化结果而非空白。
+  // 结构化 action 摘要行：decompose（诊断）、evaluate_session（评分导出）、
+  // progress/task/usage（进度分、任务状态、用量统计）——这些动作不产生
+  // reward_a/b，面板应显示其实际内容而非空白「正常」卡。
   let summaryLine: string | null = null
   if (data && !running && !isError) {
     if (action === 'decompose') {
@@ -159,6 +160,41 @@ export function derivePanelState(
       const trend = typeof exp?.trend === 'number' ? exp.trend : null
       const mean = typeof exp?.summary === 'number' ? exp.summary : null
       summaryLine = `📊 checkpoint ${cps} 个${mean !== null ? ` · 均分 ${mean.toFixed(3)}` : ''}${trend !== null ? ` · 趋势 ${trend >= 0 ? '+' : ''}${trend.toFixed(3)}` : ''}`
+    } else if (action === 'progress_update') {
+      summaryLine = typeof data.score === 'number'
+        ? `📈 进度分: ${data.score.toFixed(3)}`
+        : null
+    } else if (action === 'progress_start') {
+      summaryLine = typeof data.tracker_id === 'string'
+        ? `🆕 tracker: ${data.tracker_id}（后续 progress_update 用此 id 上报进度）`
+        : null
+    } else if (action === 'progress_close') {
+      summaryLine = data.closed === true ? '✅ 追踪已关闭' : null
+    } else if (action === 'task_start') {
+      summaryLine = `📤 任务 ${String(data.task_id ?? '?')} 已提交（${String(data.status ?? 'running')}）——用 task_status 轮询结果`
+    } else if (action === 'task_status') {
+      if (data.status === 'done') {
+        const r = (data.result ?? data) as Record<string, unknown>
+        const idx = typeof r.index === 'number' ? r.index : null
+        const scores = Array.isArray(r.scores) ? (r.scores as unknown[]).map((s) => Number(s).toFixed(3)).join(', ') : null
+        const reward = typeof r.reward_a === 'number' ? `reward_a=${Number(r.reward_a).toFixed(3)} / reward_b=${Number(r.reward_b).toFixed(3)}` : null
+        const sig = typeof r.signal === 'string' ? ` · ${r.signal}` : ''
+        summaryLine = `✅ 任务完成${idx !== null ? ` · 冠军 ${String.fromCharCode(65 + idx)}` : ''}${scores !== null ? ` · scores [${scores}]` : ''}${reward !== null ? ` · ${reward}` : ''}${sig}`
+      } else {
+        summaryLine = `⏳ 任务 ${String(data.task_id ?? '?')} ${String(data.status ?? '运行中')}——可用 wait_seconds 轮询等待`
+      }
+    } else if (action === 'usage') {
+      const u = (data.usage ?? data) as Record<string, unknown>
+      const calls = typeof u.calls === 'number' ? u.calls : null
+      const inTok = typeof u.input_tokens === 'number' ? u.input_tokens : null
+      const outTok = typeof u.output_tokens === 'number' ? u.output_tokens : null
+      const hit = typeof u.cache_hit_rate === 'number' ? `${Math.round(u.cache_hit_rate * 100)}%` : null
+      const parts = [
+        calls !== null ? `${calls} 次调用` : null,
+        inTok !== null && outTok !== null ? `${(inTok / 1000).toFixed(1)}K in / ${(outTok / 1000).toFixed(1)}K out tokens` : null,
+        hit !== null ? `缓存命中 ${hit}` : null,
+      ].filter(Boolean)
+      summaryLine = parts.length ? `📊 ${parts.join(' · ')}` : null
     }
   }
 
