@@ -23,3 +23,6 @@ AUDIT-*.md
 # Python bytecode
 __pycache/
 *.pyc
+
+pnpm-lock.yaml
+*.bak2
