@@ -16,14 +16,18 @@ jobs:
           node-version: 22
 
       - name: Install toolchain
-        run: npm install --no-audit --no-fund
+        # --legacy-peer-deps: the DSH ecosystem ships peer ranges that npm's
+        # strict resolver rejects (e.g. dsh-brand needs dsh-invariants
+        # ^0.0.1-rc but the resolved tree has 0.1.0-rc). The harness installs
+        # these via pnpm/bundles which tolerate the overlap; CI mirrors that.
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       # The host typecheck/tests import DSH peer packages (dsh-tools,
       # cordis, ...). A global dsh install provides them; build.sh links the
       # junctions from it (DSH_INSTALL layout).
       - name: Install DSH peer bundle
         run: |
-          npm install -g @deepseek-ai/dsh
+          npm install -g --legacy-peer-deps @deepseek-ai/dsh
           echo "DSH_INSTALL=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
 
       - name: Build (host + client)
