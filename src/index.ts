@@ -42,7 +42,7 @@ export interface Config {
   bridgeTimeoutMs?: number
   /** Timeout budget in ms for ASYNC verifier tasks (default 30min). */
   taskTimeoutMs?: number
-  /** Default verifier model id (e.g. deepseek-v4-pro); per-call args override. */
+  /** Default verifier model id (e.g. deepseek-v4-flash-vision-exp); per-call args override. */
   verifierModel?: string
   /** Explicit OpenAI-compatible backend base URL (overrides credential auto-detect). */
   backendBaseUrl?: string

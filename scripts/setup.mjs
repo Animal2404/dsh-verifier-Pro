@@ -90,8 +90,8 @@ const KNOWN_BACKENDS = [
   {
     envKey: 'OPENCODE_GO_API_KEY',
     label: 'OpenCode Zen',
-    // U-B5: flash 被上游禁用 logprobs 返回（400），v4-pro 实测可用。
-    model: 'deepseek-v4-pro',
+    // 2026-08-23: flash-vision-exp 实测可评分且更省；flash 本体被上游禁 logprobs。
+    model: 'deepseek-v4-flash-vision-exp',
     baseUrl: 'https://opencode.ai/zen/go/v1',
     applyUrl: 'https://opencode.ai',
   },

@@ -51,7 +51,7 @@ node scripts/setup.mjs --fix      # 自动修复：建 .venv + 安装 llm-verifi
 
 `--check` 会根据你在 `~/.dsh/.credentials.yaml` 里已有的凭据**自动推荐评分后端配置**
 （有 DEEPSEEK_API_KEY → 推荐 deepseek-chat @ api.deepseek.com；有 OPENCODE_GO_API_KEY →
-推荐 opencode + deepseek-v4-pro；都没有 → 给出申请地址），并直接对比当前硬编码值，
+推荐 opencode + deepseek-v4-flash-vision-exp；都没有 → 给出申请地址），并直接对比当前硬编码值，
 把"装完不能直接用"的根源指出来。按它给的片段改 `cordis.patch.yml` 两行即可适配你的环境。
 
 ### 手动安装（等效于 --fix 做的事）
@@ -77,13 +77,13 @@ bash scripts/build.sh
 | 你有的凭据 | verifierModel | backendBaseUrl | 实测状态 |
 |---|---|---|---|
 | `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` | ✅ 推荐 |
-| `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-pro` | `https://opencode.ai/zen/go/v1` | ⚠️ flash 已被禁 |
+| `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
 > ⚠️ **2026-08-22 起勿用 opencode 的 `deepseek-v4-flash` 打分**：上游为该模型启用了
 > DFLASH 投机解码，拒绝一切 logprob 请求（400 "does not support return_logprob"）。
 > 普通对话不受影响，但 verifier 打分必需 logprobs。同端点实测可用替代：
-> `deepseek-v4-pro`、`qwen3.8-max`。
+> `deepseek-v4-flash-vision-exp`、`qwen3.7-plus`、`qwen3.6-plus`。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
 `.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>` 可验证你的端点是否返回 logprobs；
@@ -163,7 +163,7 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
       name: '@dsh-external/dsh-verifier-pro'
       config:
         bridgeTimeoutMs: 300000
-        verifierModel: deepseek-v4-pro
+        verifierModel: deepseek-v4-flash-vision-exp
         maxWorkers: 4
         promptSection: true
 ```

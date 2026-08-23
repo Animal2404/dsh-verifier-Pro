@@ -17,10 +17,11 @@
         # Async verifier-task timeout in ms (long tournament scorings).
         taskTimeoutMs: 1800000
         # Default verifier model; per-call `model` args override.
-        # 2026-08-22: deepseek-v4-flash 被 Open Code 上游 DFLASH 投机解码禁用
-        # logprobs 返回（400），v4-pro 实测可用。DeepSeek 官方账户余额不足
-        # （402），切回 opencode 组合；充值后可换回 deepseek-chat。
-        verifierModel: deepseek-v4-pro
+        # 2026-08-23: 默认改为 deepseek-v4-flash-vision-exp（实测可评分、成本低）。
+        # 备选可用：qwen3.7-plus / qwen3.6-plus（top_logprobs 已按模型裁剪）。
+        # 禁用：deepseek-v4-flash（DFLASH 不支持 logprobs 400）、muse-spark/
+        # minimax*/mimo*/hy3（上游不返回 token 级 logprobs）。
+        verifierModel: deepseek-v4-flash-vision-exp
         # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
         backendBaseUrl: https://opencode.ai/zen/go/v1
         # Concurrent workers inside the Python bridge.
