@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  # 蹇?job锛氱函閫昏緫楠岃瘉锛堟棤 llm-verifier / 鏃?harness 渚濊禆锛夛紝~1 鍒嗛挓鍐呭畬鎴?  core:
+  # 快 job：纯逻辑验证（无 llm-verifier / 无 harness 依赖），~1 分钟内完成
+  core:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -23,7 +24,12 @@ jobs:
 
       - name: Compile harness-free TS modules standalone
         run: |
-          # lib/ 涓嶅叆搴擄紝CI 宸ヤ綔鍖轰复鏃垛€斺€旂紪璇戝埌 lib/ 璁╃函閫昏緫娴嬭瘯鐨?          # ../lib/* import 瑙ｆ瀽锛堜粎 node 鍐呯疆渚濊禆锛岄浂 harness锛夈€?          # 瑁?`npx tsc` 浼氭媺鍒板啋鍚嶅寘 tsc@2.0.4鈥斺€斿繀椤?-p typescript@5.9銆?          # npm install 蹇呴』 --legacy-peer-deps锛氭湰浠撳簱 peer 涓栫晫鏈夊啿绐?          # 锛坉sh-brand/dsh-invariants 绛夛級锛屼笉甯︿細 ERESOLVE 鍗℃ 10 鍒嗛挓銆?          npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
+          # lib/ 不入库，CI 工作区临时——编译到 lib/ 让纯逻辑测试的
+          # ../lib/* import 解析（仅 node 内置依赖，零 harness）。
+          # 裸 `npx tsc` 会拉到冒名包 tsc@2.0.4——必须 -p typescript@5.9。
+          # npm install 必须 --legacy-peer-deps：本仓库 peer 世界有冲突
+          # （dsh-brand/dsh-invariants 等），不带会 ERESOLVE 卡死 10 分钟。
+          npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
           npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts \
             --outDir lib --module nodenext --moduleResolution nodenext \
             --target es2022 --skipLibCheck --esModuleInterop
@@ -34,7 +40,8 @@ jobs:
           node --test tests/concurrency.test.mjs
           node --test tests/build_evidence.test.mjs
 
-  # 鎱?job锛歜ridge_fix 妗ュ浠讹紙闇€ pip 瑁?llm-verifier锛?  bridge:
+  # 慢 job：bridge_fix 桥套件（需 pip 装 llm-verifier）
+  bridge:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,8 +49,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          # 鏃?cache: pip 鈥斺€?浠撳簱娌℃湁 requirements.txt/pyproject.toml 浣滀负
-          # 缂撳瓨閿枃浠讹紝setup-python 鐨?pip cache 浼氱洿鎺ユ姤閿欍€?
+          # 无 cache: pip —— 仓库没有 requirements.txt/pyproject.toml 作为
+          # 缓存键文件，setup-python 的 pip cache 会直接报错。
+
       - name: Install llm-verifier
         run: |
           python -m pip install --quiet "llm-verifier>=0.2.0"
