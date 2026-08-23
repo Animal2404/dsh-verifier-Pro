@@ -437,6 +437,9 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     margin_after: Math.abs(avg('reward_a') - avg('reward_b')),
     consistency: `${agreeing}/${kUsed}${agreeing < kUsed ? '，建议谨慎参考' : ''}`,
     cached: false,
+    // 审查 #4: 结果携带真实耗时，让调用方/面板对成本有预期（history 中
+    // compare 中位 ~10.8s，升级时 ×k_used）。
+    duration_ms: Date.now() - started,
   }
   // F1: composite 不能丢掉 k1/reps 的异常标记——否则越界警告在升级后凭空消失。
   if (k1.anomaly !== undefined) {
@@ -653,6 +656,9 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     margin_after: marginAfter,
     consistency: 'top1 一致',
     cached: false,
+    // 审查 #4: 真实耗时 + 候选数，供 renderResult 展示与大 N 异步提示。
+    duration_ms: Date.now() - started,
+    candidates_count: p.candidates.length,
   }
   // F1: k1 的异常标记不因升级而丢失（escalated 自身的已在 spread 中带上）。
   if (composite.anomaly === undefined && k1.anomaly !== undefined) {
@@ -939,13 +945,21 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
   }
   if (value.index !== undefined || value.ranking !== undefined) {
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n⚠️ ${value.warning}` : ''}` }
+    // 审查 #4: 展示真实耗时；大候选数时提示异步路径（select 中位 ~37.8s）。
+    const secs = typeof value.duration_ms === 'number' ? ` ⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : ''
+    const n = typeof value.candidates_count === 'number' ? value.candidates_count : null
+    const asyncHint = n !== null && n >= 8
+      ? `\n💡 ${n} 候选锦标赛耗时较大，可改用 task_start 异步执行（select 中位 ~37.8s）`
+      : ''
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n⚠️ ${value.warning}` : ''}${asyncHint}` }
   }
   if (value.reward_a !== undefined) {
     const flags = [
       value.escalated !== undefined ? `escalated=${value.escalated}` : null,
       value.cached !== undefined ? `cached=${value.cached}` : null,
       typeof value.note === 'string' ? `note: ${value.note}` : null,
+      // 审查 #4: 真实耗时（history 中 compare 中位 ~10.8s）。
+      typeof value.duration_ms === 'number' ? `⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : null,
       // F1: anomaly/warning must stay visible on ok/escalated results too —
       // a silently-clipped score must never render as a clean green result.
       typeof value.warning === 'string' ? `⚠️ ${value.warning}` : null,

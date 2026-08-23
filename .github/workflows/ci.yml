@@ -107,8 +107,9 @@ jobs:
       - name: Transpile host with tsc --noCheck (runnable JS, not type-checked)
         # 不装 @types/node：--noCheck 只转译不检查类型；且 npm 在 pnpm 布局的
         # node_modules 上跑会崩（"Cannot read properties of null (isDescendantOf)"）。
+        # 不带 --declaration false：tsconfig 的 declarationDir 要求 declaration 开启。
         run: |
-          npx --yes -p typescript@5.9 tsc -p tsconfig.json --noCheck --declaration false
+          npx --yes -p typescript@5.9 tsc -p tsconfig.json --noCheck
 
       - name: Full node test suite (incl. harness-dependent tests)
         run: node --test tests/*.test.mjs
