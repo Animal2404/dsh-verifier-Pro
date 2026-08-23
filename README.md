@@ -188,6 +188,31 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），用于成本估算（预留） |
 | `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算（预留） |
 
+### 配置详解（这个文件是干嘛的、怎么改）
+
+`cordis.patch.yml` 是 DSH 的**补丁层**：插件的这份文件（随包分发）声明「把插件挂进 profile 的加载组合」。核心结构：
+
+```yaml
+- insert:                      # 顶层必须是 insert 列表
+    - id: verifier-brain       # 加载条目 id（插件内唯一标识）
+      name: '@dsh-external/dsh-verifier-pro'  # 可被 Node 解析的包名，须与 package.json name 一致
+      config: { ... }          # 注入给插件 apply() 的配置对象（上表字段都在这里）
+```
+
+**改配置的两种方式**：
+1. **改 profile 补丁**（推荐）：编辑 `~/.dsh/profiles/<profile>/cordis.patch.yml`，对 `verifier-brain` 条目覆盖字段。改完重启 dsh 生效。
+2. **改插件自带的补丁**：直接改本文件后重新安装——会作为 bundle patch 应用到所有装它的 profile。
+
+**切换 LLM 后端的步骤**（例如从 opencode 切到 DeepSeek 官方）：
+1. 确认 `~/.dsh/.credentials.yaml` 里有对应凭据（`DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` / `VERTEX_API_KEY`）
+2. 改 `backendBaseUrl` + `verifierModel` 指向目标后端（表见「后端对照」节）
+3. 重启 dsh
+4. 跑一次 `compare` 验证：`probe` 会先探测 logprobs 支持，不支持的后端会直接报错（不烧钱）
+
+**分级评分（可选，省钱的进阶配置）**：设置 `escalationModel` 后，只有分差落噪声带的升级轮会用这个「更强模型」，首评保持廉价档。留空 = 升级轮复用 `verifierModel`。
+
+> ⚠️ 改完配置必须重启 dsh（配置在加载时读取，热重载不重读配置）。
+
 ## 版本钉扎指引
 
 为避免 `dsh plugin add github:Animal2404/dsh-verifier-Pro` 拉取最新 main 分支导致不兼容变更，**强烈建议使用 commit hash 钉扎版本**：
@@ -201,6 +226,92 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 ```
 
 > ⚠️ 不加 `#commit` 或 `#tag` 将始终拉取最新 main，可能引入破坏性变更。
+
+## 性能基准（实测，非估算）
+
+以下数据来自 `~/.dsh/verifier-brain/history.jsonl` 的真实调用统计（94 次评分），
+后端 opencode `deepseek-v4-flash-vision-exp`，单并发：
+
+| 操作 | 样本 | 中位耗时 | 范围 | 说明 |
+|---|---|---|---|---|
+| `compare`（两两对比） | 59 | **10.8s** | 1.9–72.3s | 单次评分；分差落噪声带会自动升级 K=3，耗时会放大 |
+| `select`（N 候选排名） | 23 | **37.8s** | 2.7–117.5s | PPT 锦标赛；3 候选 n=1 pivots=2 约 30-40s |
+| `track`（轨迹评分） | 2 | **2.6s** | 1.6–2.6s | 短轨迹 |
+| `decompose`（分解验证） | 实测 | **30–65s** | — | 输出长（步骤摘要+错误分类+核查问题），max_tokens 4096 |
+
+**影响耗时的因素**：
+- `n_evaluations`（每候选评分次数，默认 1）→ 线性放大
+- `pivots`（锦标赛枢轴，默认 2）→ 锦标赛规模
+- 自动升级（分差落噪声带 → K=3）→ 约 3 倍
+- **literal-mc 模型**（minimax/mimo 等）：默认 K=5 采样 = 5 次调用
+
+**成本估算**（opencode 计价，约 ¥0.3/百万 token 输入档）：
+- 一次 `compare` 约 2-5K token → 成本可忽略（<¥0.01）
+- 一次 `select`（3 候选）约 10-20K token → ~¥0.01 量级
+- 大规模批量使用时，literal-mc 的 K=5 会是主要成本因子（5×调用次数）
+
+> 想压成本/延迟：`n_evaluations=1` + 短 criteria + 大载荷走异步任务（不阻塞 agent）。
+
+## 常见错误排查（FAQ）
+
+按「出问题的层」分层诊断——`verifier` 工具报错时先定位是哪一层：
+
+### 层 1：LLM 后端（最常见）
+
+| 错误特征 | 原因 | 解决 |
+|---|---|---|
+| `DFLASH speculative decoding does not support return_logprob` (400) | 用了 `deepseek-v4-flash`（上游禁 logprobs）| 换 `deepseek-v4-flash-vision-exp` 或 qwen3.7/3.6-plus |
+| `Range of top_logprobs should be [0, 5]` (400) | qwen 系模型 top_logprobs 上限 5 | 自动处理（桥已按模型裁剪）；若手动传参别超 5 |
+| `Invalid API key` (401) | 后端凭据缺失/错误 | 检查 `~/.dsh/.credentials.yaml` 对应 key；`setup.mjs --check` 会诊断 |
+| `no answer logprobs` | 模型不返回 token 级 logprobs（muse/minimax 等）| 插件自动走 literal-mc 降级；仍失败则换模型 |
+| 所有候选精确 0.5（degraded）| 评分批量失败被 tie 掩蔽 | 换后端/模型重试 |
+
+### 层 2：Python 桥
+
+| 错误 | 原因 | 解决 |
+|---|---|---|
+| `llm-verifier is not installed` | .venv 缺包 | `.venv/Scripts/python -m pip install "llm-verifier>=0.2.0"` |
+| `python bridge timed out after 30000ms` | 桥首次建连或模型响应慢 | 重试；确认模型可用（见层 1）|
+| `Connection error` | 桥进程异常退出 | 会自动重启；仍不行重启 dsh |
+
+### 层 3：DSH 宿主 / 配置
+
+| 错误 | 原因 | 解决 |
+|---|---|---|
+| 工具不存在 / 未注册 | 插件未装配 | 检查 `cordis.patch.yml` 的 insert 条目；重启 dsh |
+| 改配置不生效 | 配置加载时读取 | **重启 dsh**（热重载不重读配置）|
+| `Cannot find module` | 依赖链接缺失 | 重跑 `scripts/build.sh`（会重建 node_modules 链接）|
+
+> 通用排查顺序：**先看错误信息是哪层的**（401/400=后端，timeout/Connection=桥，module/未注册=宿主），
+> 别从 Node 环境开始猜。`setup.mjs --check` 会一次性诊断后端凭据 + .venv + lib 产物。
+
+## 命名说明
+
+项目名 `dsh-verifier-Pro` 与内部文件名 `verifier_brain_bridge.py` 不一致是历史遗留：
+插件最初叫 verifier-Pro，重构时引入了更精确的「brain」内部命名（`dsh-verifier-brain` 目录、
+`bridge/verifier_brain_bridge.py`），但仓库名未同步改。二者指同一插件；以 `package.json` 的
+`@dsh-external/dsh-verifier-pro` 为准。依赖版本：`llm-verifier` 以 `>=0.2.0` 约束（桥侧有最低
+版本检查，过旧会明确报错）。
+
+## 端到端示例（从装到用）
+
+```bash
+# 1) 安装（推荐钉扎）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.5.0
+
+# 2) 检查环境（凭据 + .venv + 产物一次诊断）
+cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
+
+# 3) 重启 DSH 让配置生效
+# 4) 在任意会话让 agent 调用 verifier（说人话即可）：
+#    "用 verifier 对比这两个方案哪个好" → compare
+#    "给这三个实现排个名"            → select
+#    "复盘这条轨迹哪里有问题"        → decompose
+#    "给这段会话打个分"              → evaluate_session
+
+# 5) 面板：工具结果以卡片显示（徽章/分数/验证锚定等级/采样提示）
+# 6) 需要审计时：评分历史在 ~/.dsh/verifier-brain/history.jsonl
+```
 
 ### criteria 写法（重要）
 
