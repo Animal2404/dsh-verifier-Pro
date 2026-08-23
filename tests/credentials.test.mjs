@@ -46,6 +46,24 @@ test('known keys under a refs: nest are stored verbatim at any depth', () => {
   assert.equal(map.get('OPENCODE_GO_API_KEY'), 'oc-under-refs')
 })
 
+test('R3-1: provider-section non-key children (base_url) never clobber the credential', () => {
+  const map = parseCredentialYaml([
+    'deepseek:',
+    '  api_key: sk-real-123',
+    '  base_url: https://api.deepseek.com',
+  ].join('\n'))
+  assert.equal(map.get('DEEPSEEK_API_KEY'), 'sk-real-123', 'base_url must NOT overwrite the key')
+})
+
+test('R3-1: top-level keys reset the provider section (no cross-section pollution)', () => {
+  const map = parseCredentialYaml([
+    'deepseek:',
+    '  api_key: sk-real-123',
+    'TOP_OTHER: oops-value',
+  ].join('\n'))
+  assert.equal(map.get('DEEPSEEK_API_KEY'), 'sk-real-123', 'flat key after a section must not pollute it')
+})
+
 test('U-B4: env-only proxy alias fires with NO credentials file', () => {
   const env = resolveBridgeEnv(
     { OPENCODE_GO_API_KEY: 'oc-env-only' },

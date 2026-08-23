@@ -160,8 +160,10 @@ async function smokeHtml(cdp, file, outDir) {
   const fileUrl = 'file:///' + resolve(file).replace(/\\/g, '/')
   // 清空上一候选的异常残留，避免会话级收集器跨候选串扰
   cdp.collectedExceptions.length = 0
-  // addScriptToEvaluateOnNewDocument：每个新文档加载前自动执行，导航后依然有效
-  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ERR_COLLECTOR })
+  // R3-10: ERR_COLLECTOR is injected ONCE per CDP session (in main) — the old
+  // per-candidate addScriptToEvaluateOnNewDocument accumulated k collectors
+  // after k candidates, each pushing into the same window.__errs and inflating
+  // the error count by up to k× per page.
   await cdp.send('Page.navigate', { url: fileUrl })
   await new Promise(r => setTimeout(r, WAIT_MS))
   const result = await cdp.evalJs(`
@@ -192,11 +194,18 @@ async function smokeHtml(cdp, file, outDir) {
   // 无 update 函数的静态页：探针无法驱动行为，显式标记 unknown 而非静默 ok:true（审计 P0-3）
   const probeable = parsed.hasUpdate === true
   if (!probeable && errors.length === 0) {
+    // R3-9: the note promised "验证加载无错+截图" but the screenshot was
+    // never taken — static pages silently lost their visual-evidence block.
+    const screenshot = join(outDir, `${name}.png`)
+    try {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
+      writeFileSync(screenshot, Buffer.from(shot.result.data, 'base64'))
+    } catch { /* screenshot best-effort */ }
     return {
       file, kind: 'html', ok: true,
       note: 'probe-skip: 页面无可驱动的 update() 探针，仅验证加载无错+截图；行为正确性未测',
       probeSkipped: true,
-      errors, screenshot: null,
+      errors, screenshot: existsSync(screenshot) ? screenshot : null,
       state: parsed.state ?? null, player: parsed.player ?? null,
       ticksDone: false,
     }
@@ -264,6 +273,9 @@ async function main() {
     await withChrome(async () => {
       const cdp = await cdpConnect(CDP_PORT)
       try {
+        // R3-10: inject the error collector ONCE for the whole session (see
+        // smokeHtml for why per-candidate injection was wrong).
+        await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ERR_COLLECTOR })
         for (const f of htmlFiles) {
           const r = await smokeHtml(cdp, f, OUT_DIR)
           results.push(r)

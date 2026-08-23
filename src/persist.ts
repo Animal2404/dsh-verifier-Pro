@@ -4,7 +4,7 @@
  * restarts and plugin reloads — fixing the reference implementation's
  * "in-memory only" limitation.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { VerifierHistoryRecord, VerifierTaskRecord } from './types.js'
@@ -12,6 +12,8 @@ import type { VerifierHistoryRecord, VerifierTaskRecord } from './types.js'
 /** JSONL rotation: rewrite only when crossed; keep the newest tail. */
 const ROTATE_THRESHOLD = 2000
 const ROTATE_KEEP = 1000
+/** Cheap pre-check: skip the full read unless the file grew past ~this. */
+const ROTATE_THRESHOLD_BYTES = 256 * 1024
 
 export class VerifierStore {
   private readonly dir: string
@@ -85,16 +87,24 @@ export class VerifierStore {
   }
 
   /**
-   * Cap unbounded JSONL growth: past ROTATE_THRESHOLD lines, keep only the
-   * most recent ROTATE_KEEP lines. F11 follow-up: history.jsonl used to grow
-   * forever (estimateCallMs then paid a full-file read on every escalation).
+   * Cap unbounded JSONL growth: past ROTATE_THRESHOLD_BYTES, keep only the
+   * most recent ROTATE_KEEP lines. R3-18: the old implementation read+split
+   * the WHOLE file on every append (O(n) hot-path IO) and rewrote in place
+   * (non-atomic — a crash mid-rewrite left a truncated file). Now the
+   * steady-state check is a single stat(); the full read+rewrite happens only
+   * when the threshold is crossed, and the rewrite is atomic (tmp+rename).
    */
   private rotateIfNeeded(file: string): void {
     try {
+      if (!existsSync(file)) return
+      const { size } = statSync(file)
+      if (size <= ROTATE_THRESHOLD_BYTES) return
       const lines = readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim())
       if (lines.length <= ROTATE_THRESHOLD) return
       const kept = lines.slice(-ROTATE_KEEP)
-      writeFileSync(file, kept.join('\n') + '\n', 'utf8')
+      const tmp = `${file}.rot-${process.pid}`
+      writeFileSync(tmp, kept.join('\n') + '\n', 'utf8')
+      renameSync(tmp, file)
     } catch {
       // Rotation is best-effort; a failed rewrite must not lose the append.
     }

@@ -302,7 +302,16 @@ export function registerBestOfNCommand(ctx: Context, deps: {
           return { kind: 'success', text: lines.join('\n') }
         }
 
-        const index = Number(selected.index ?? 0)
+        const index = Number(selected.index ?? -1)
+        // R3-11: the winner index comes from an external scoring model — an
+        // out-of-range/NaN index used to silently announce `冠军: undefined`
+        // while printing a plausible ranking. Explicitly fail instead.
+        if (!Number.isInteger(index) || index < 0 || index >= survivors.length) {
+          return {
+            kind: 'error',
+            text: `/bestofn: 评分返回的冠军索引非法（index=${String(selected.index)}，幸存候选 ${survivors.length} 个）。请人工复核候选，不要采信本结果。`,
+          }
+        }
         const scores = Array.isArray(selected.scores) ? selected.scores as number[] : []
         const champion = survivors[index]?.name
         const lines: string[] = []

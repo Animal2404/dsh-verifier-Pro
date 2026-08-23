@@ -206,7 +206,13 @@ export class PythonBridge {
       // F3 defense-in-depth: a malformed frame may be a corrupted response for
       // a pending request. Correlate by id when possible and fail fast instead
       // of letting the request dangle until its full budget timeout.
-      const m = /"id"\s*:\s*(\d+)/.exec(line)
+      // R3-F3: ids on the wire are STRINGS ("id":"3" — String(seq) on our
+      // side, echoed verbatim by Python), so the regex must accept the quoted
+      // form; it previously required bare digits and never matched → dead code
+      // (runtime-simulated by Round C). Also only try correlation when the
+      // line looks like a JSON object — a stray log line containing `"id": 7`
+      // must not kill an innocent in-flight request.
+      const m = /^\{[\s\S]*"id"\s*:\s*"?(\d+)"?/.exec(line.trimStart())
       const id = m ? m[1] : undefined
       const pending = id ? this.pending.get(id) : undefined
       if (pending && id) {

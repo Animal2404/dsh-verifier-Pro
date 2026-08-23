@@ -109,15 +109,25 @@ export function parseCredentialYaml(text: string): Map<string, string> {
     const value = unquote(match[2].trim())
     if (!value || value === '~' || value === 'null') continue
 
+    // R3-1: a top-level key MUST reset the provider section — otherwise a
+    // flat `TOP_OTHER: x` line after `deepseek:` would be parsed as a child
+    // of deepseek and pollute DEEPSEEK_API_KEY (cross-section contamination,
+    // confirmed by runtime reproduction).
+    if (indent === 0) section = null
+
     if (KNOWN_KEYS.has(key)) {
       // Known credential key — store verbatim at any nesting depth.
       map.set(key, value)
     } else if (section !== null && SECTION_TO_CRED_KEY.has(section)) {
       // Provider-section child (e.g. deepseek.api_key) → canonical name.
-      map.set(SECTION_TO_CRED_KEY.get(section) as string, value)
+      // R3-1: only key/token/secret-like children map — arbitrary members
+      // such as `base_url:` or `description:` must NOT overwrite the
+      // credential (they used to, last-write-wins → silent wrong key → 401).
+      if (/(key|token|secret)/i.test(key)) {
+        map.set(SECTION_TO_CRED_KEY.get(section) as string, value)
+      }
     }
     // Anything else is not a verifier backend credential — ignore.
-    void indent
   }
   return map
 }

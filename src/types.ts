@@ -91,4 +91,6 @@ export interface VerifierTaskRecord {
   ts: string
   result?: unknown
   error?: string
+  /** R3-16: wall-clock duration on the done transition (params stays intact). */
+  duration_ms?: number
 }

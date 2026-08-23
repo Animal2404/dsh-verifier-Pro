@@ -116,12 +116,22 @@ function renderDescribe(d) {
 }
 
 // F10: must match smoke.mjs's artifactName() exactly — stem + short hash of
-// the resolved path — so same-basename candidates never collide.
+// the resolved ORIGINAL path — so same-basename candidates never collide.
 import { createHash } from 'node:crypto'
 const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
 function artifactName(input) {
-  const stem = basename(input).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
-  return `${stem}-${shortHash(resolve(input))}`
+  // R3-19: when the input IS a .smoke.json/.describe.json, the original
+  // artifact path is recorded in its `file` field — hashing the json path
+  // used to produce a DIFFERENT name than smoke.mjs wrote (mismatch).
+  let base = input
+  if (/\.(smoke|describe)\.json$/i.test(input)) {
+    try {
+      const rec = JSON.parse(readFileSync(input, 'utf8'))
+      if (typeof rec.file === 'string' && rec.file) base = rec.file
+    } catch { /* fall back to the input path */ }
+  }
+  const stem = basename(base).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+  return `${stem}-${shortHash(resolve(base))}`
 }
 
 function buildBlock(input, summary) {

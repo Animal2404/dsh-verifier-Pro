@@ -6,10 +6,14 @@
  *
  * U-N2/U-N9: select/compare/track are routed through the SAME escalation
  * runner as the model-facing tools — result caching, clamp01 invariant,
- * auto-escalation, the shared concurrency gate, history persistence, and
- * criteria parsing now apply identically. `defaultModel` is injected when
- * the caller omits `model`, so callers never fall through to the official
- * package's gemini default (which 401s on DeepSeek credentials).
+ * auto-escalation, the shared concurrency gate, history persistence and
+ * sanitize/bounds now apply to the seam too (select/compare via runSelect/
+ * runCompare; track via the runner fall-through which sanitizes text and
+ * bounds n_evaluations). `defaultModel` is injected when the caller omits
+ * `model`, so callers never fall through to the official package's gemini
+ * default (which 401s on DeepSeek credentials). R3-19: select/compare now
+ * REQUIRE `criteria`, mirroring the task_start validation (the bridge would
+ * otherwise silently substitute DEFAULT_CRITERIA).
  */
 import { Service, type Context } from 'cordis'
 import type { PythonBridge } from './bridge.js'
@@ -51,10 +55,21 @@ export class VerifierBrainService extends Service {
   }
 
   async select(params: Record<string, unknown>): Promise<unknown> {
+    // R3-19: same rationale as U-N1 — the bridge silently swaps in
+    // DEFAULT_CRITERIA when criteria is missing (semantic drift + injection
+    // surface); the service seam must not be the quiet exception.
+    const c = params.criteria
+    if (c === undefined || c === null || (typeof c === 'string' && !c.trim())) {
+      throw new Error('verifierBrain.select requires `criteria` (preset name or criteria object)')
+    }
     return this.deps.run('select', this.withModel(params))
   }
 
   async compare(params: Record<string, unknown>): Promise<unknown> {
+    const c = params.criteria
+    if (c === undefined || c === null || (typeof c === 'string' && !c.trim())) {
+      throw new Error('verifierBrain.compare requires `criteria` (preset name or criteria object)')
+    }
     return this.deps.run('compare', this.withModel(params))
   }
 
@@ -63,7 +78,9 @@ export class VerifierBrainService extends Service {
   }
 
   async progressStart(params: Record<string, unknown>): Promise<unknown> {
-    return this.deps.run('progress_start', params)
+    // R3-7: progress_start accepts a model — inject defaultModel so callers
+    // cannot fall through to the official gemini default (401 on DeepSeek).
+    return this.deps.run('progress_start', this.withModel(params))
   }
 
   async progressUpdate(params: Record<string, unknown>): Promise<unknown> {

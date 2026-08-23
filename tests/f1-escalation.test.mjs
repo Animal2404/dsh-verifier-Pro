@@ -105,3 +105,18 @@ test('F13: first escalation rep failure degrades to k1 instead of discarding it'
   assert.equal(Number(out.reward_b), 0.60, 'k1 reward preserved')
   assert.ok(typeof out.note === 'string' && out.note.includes('保留首评'), 'degrade note present')
 })
+
+test('R3-2: select unstable branch returns CLAMPED escalated scores (no leak)', async () => {
+  const bridge = fakeBridge([
+    { index: 0, scores: [0.55, 0.50] }, // k1: margin 0.05 → escalate
+    { index: 1, scores: [0.58, 42.7] }, // escalation: different winner + out of range
+  ])
+  const run = createEscalationRunner(baseDeps(bridge, {}))
+  const out = await run('select', { problem: 'p-r3-2', candidates: ['a', 'b'] })
+  assert.equal(out.signal, 'unstable', 'different winners ⇒ unstable')
+  const escScores = out.escalated_result?.scores
+  assert.ok(Array.isArray(escScores), 'escalated_result.scores present')
+  for (const s of escScores) {
+    assert.ok(typeof s === 'number' && s >= 0 && s <= 1, 'unstable escalated scores must be clamped: ' + String(s))
+  }
+})

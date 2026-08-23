@@ -86,26 +86,32 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
   if (raw === undefined || raw === '') return undefined
   const trimmed = raw.trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let parsed: unknown
     try {
-      const parsed: unknown = JSON.parse(trimmed)
-      if (parsed && typeof parsed === 'object') {
-        const obj = parsed as Record<string, unknown>
-        // Check if it's a weight object (all values are numbers)
-        const values = Object.values(obj)
-        if (values.length > 0 && values.every(v => typeof v === 'number')) {
-          // Validate weights: non-negative and sum to 1.0 (±0.001)
-          const sum = values.reduce((acc, v) => acc + (v as number), 0)
-          if (values.some(v => (v as number) < 0)) {
-            throw new Error('criteria weights must be non-negative')
-          }
-          if (Math.abs(sum - 1.0) > 0.001) {
-            throw new Error(`criteria weights must sum to 1.0 (got ${sum.toFixed(3)})`)
-          }
-        }
-        return obj as Criteria
-      }
+      parsed = JSON.parse(trimmed)
     } catch {
-      // Fall through: send the raw string and let llm-verifier decide.
+      // Malformed JSON string: fall through and send the raw string, letting
+      // llm-verifier treat it as a preset name.
+      return trimmed
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>
+      // Check if it's a weight object (all values are numbers)
+      const values = Object.values(obj)
+      if (values.length > 0 && values.every(v => typeof v === 'number')) {
+        // R3-6: weight validation must be OUTSIDE the JSON.parse catch — the
+        // throw used to be swallowed by it (dead code), so invalid weights
+        // (negative / sum ≠ 1.0) silently went to the scorer while the README
+        // promised they would be rejected.
+        if (values.some(v => (v as number) < 0)) {
+          throw new Error('criteria weights must be non-negative')
+        }
+        const sum = values.reduce((acc, v) => acc + (v as number), 0)
+        if (Math.abs(sum - 1.0) > 0.001) {
+          throw new Error(`criteria weights must sum to 1.0 (got ${sum.toFixed(3)})`)
+        }
+      }
+      return obj as Criteria
     }
   }
   return trimmed
@@ -129,6 +135,13 @@ function cached<T>(key: string, request: () => Promise<T>): Promise<T> {
   })
   resultCache.set(key, promise)
   return promise
+  // R3-13 (documented tradeoff): in-flight dedup couples concurrent callers
+  // of the SAME key — an abort/timeout of the FIRST caller rejects the shared
+  // promise, so later callers receive "aborted by caller" even though their
+  // own signal never fired. Fixing this properly needs per-signal cache keys
+  // (a real change); the current behavior is acceptable for the tool's
+  // request model and is deliberately left documented rather than silently
+  // surprising multi-session users.
 }
 
 /** Adaptive-scaling configuration. */
@@ -187,8 +200,13 @@ const topGap = (scores: unknown): number => {
  * downstream gates compare rewards, so out-of-range values must never leak
  * through. Returns NaN unchanged (callers treat NaN as tie/degraded already);
  * flags clamping via the returned marker so results can surface the anomaly.
+ * R3-8: `null` is treated like NaN — the Python bridge washes non-finite
+ * floats to null (F3); Number(null)===0 would otherwise turn an upstream
+ * scoring failure into a confident 0.0 "bad score" instead of a tie/degraded
+ * signal.
  */
 function clamp01(value: unknown): { value: number; clamped: boolean } {
+  if (value === null || value === undefined) return { value: NaN, clamped: true }
   const n = Number(value)
   if (!Number.isFinite(n)) return { value: NaN, clamped: false }
   const c = Math.min(1, Math.max(0, n))
@@ -395,7 +413,13 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     composite.anomaly = 'reward_out_of_range'
     composite.warning = anomalyWarning
   }
-  deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [composite.reward_a, composite.reward_b], duration_ms: Date.now() - started })
+  // R3-12: history must record the model that actually produced the scores —
+  // tiered escalation spent the STRONGER model, and estimateCallMs reads this
+  // file to size the escalation budget.
+  const historyModel = (deps.esc.escalationModel && deps.esc.escalationModel !== p.model)
+    ? deps.esc.escalationModel
+    : p.model
+  deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: historyModel, scores: [composite.reward_a, composite.reward_b], duration_ms: Date.now() - started })
   resultCache.set(baseKey + ':esc', Promise.resolve(composite))
   return composite
 }
@@ -512,11 +536,13 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   try {
     // 分级评分（降本4，审计二修正）：升级用更强模型时，cache 文件按模型隔离——
     // 官方 cache_key 不含 model，共用文件会让升级 rep-0 命中首评模型的缓存分数。
+    // R3-14: ALWAYS use a fresh cache file, same model or not — the official
+    // cache_key(crit|task|a,b,rep) would otherwise hit k1's rep-0 in the
+    // shared file, so "K=3 escalation" silently averaged (k1 + r1 + r2)/2
+    // with k1 weighted 2/3 and k_used=3 overstated. Independent reps only.
+    const escCachePath = join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+    tempCacheFiles.push(escCachePath)
     const escModel = deps.esc.escalationModel ?? p.model
-    const escCachePath = escModel === p.model
-      ? selectCachePath
-      : join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
-    if (escCachePath !== selectCachePath) tempCacheFiles.push(escCachePath)
     escalated = await gatedRequest<Record<string, unknown>>(deps, 'select',
       { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
   } catch (error) {
@@ -524,6 +550,20 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
+
+  // R3-2: clamp escalated scores IMMEDIATELY (before the unstable branch) —
+  // the unstable early-return previously shipped `escalated_result.scores`
+  // raw (unclamped), letting out-of-range rewards leak past the P0-5
+  // invariant into the model context and the panel. Same-model-first as the
+  // compare path: every returned score must already be in [0,1].
+  let s3 = Array.isArray(escalated.scores) ? escalated.scores as number[] : []
+  const escClamped = s3.map((v) => clamp01(v))
+  if (escClamped.some((c) => c.clamped)) {
+    escalated.anomaly = escalated.anomaly ?? 'score_out_of_range'
+    escalated.warning = `⚠️ 升级评估返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(s3)}）`
+  }
+  s3 = escClamped.map((c) => c.value)
+  escalated.scores = s3
 
   if (escalated.index !== k1.index) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
@@ -534,6 +574,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       k_used: 3,
       message: '两次评估第一名不一致，信号不稳定，建议人工复核',
       ...(k1.anomaly !== undefined ? { anomaly: k1.anomaly, warning: k1.warning } : {}),
+      ...(escalated.anomaly !== undefined ? { anomaly: escalated.anomaly, warning: escalated.warning } : {}),
       initial: { index: k1.index, scores: k1.scores },
       escalated_result: { index: escalated.index, scores: escalated.scores },
     }
@@ -542,16 +583,9 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // Same winner: average scores element-wise when shapes match — but ONLY when
   // first pass and escalation used the SAME model (审计二修正：跨模型条件期望
   // 不可平均)。Tiered scoring 时以强模型的升级结果为准，不与首评混合。
-  // F1: 升级结果同样过 clamp01——平均混入未裁剪值会让 composite 越界。
+  // F1/R3-2: escalated scores already clamped above.
   const tiered = Boolean(deps.esc.escalationModel) && deps.esc.escalationModel !== p.model
   const s1 = Array.isArray(k1.scores) ? k1.scores as number[] : []
-  let s3 = Array.isArray(escalated.scores) ? escalated.scores as number[] : []
-  const escClamped = s3.map((v) => clamp01(v))
-  if (escClamped.some((c) => c.clamped)) {
-    escalated.anomaly = escalated.anomaly ?? 'score_out_of_range'
-    escalated.warning = `⚠️ 升级评估返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(s3)}）`
-  }
-  s3 = escClamped.map((c) => c.value)
   const averaged = (!tiered && s1.length === s3.length && s1.every((v) => typeof v === 'number'))
     ? s3.map((v, i) => (v + Number(s1[i])) / 2)
     : s3
@@ -572,7 +606,10 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     composite.anomaly = k1.anomaly
     if (typeof k1.warning === 'string') composite.warning = k1.warning
   }
-  deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: composite.index as number, scores: averaged, duration_ms: Date.now() - started })
+  // R3-12: record the model that actually scored (tiered escalation spent the
+  // stronger tier; estimateCallMs sizes budgets from this file).
+  const historyModel = tiered ? (deps.esc.escalationModel as string) : p.model
+  deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: historyModel, index: composite.index as number, scores: averaged, duration_ms: Date.now() - started })
   resultCache.set(baseKey + ':esc', Promise.resolve(composite))
   return composite
   } finally {
@@ -607,7 +644,26 @@ export function createEscalationRunner(deps: EscalationDeps) {
         max_workers: params.max_workers as number | undefined,
       })
     }
-    return gatedRequest(deps, method, params)
+    // R3-3/R3-4: fall-through methods (track / progress_*) bypass runSelect/
+    // runCompare, so the transport hardening and the F15 bounds must be
+    // applied HERE — task_start(track) and the service seam used to reach the
+    // bridge with raw n_evaluations, unsanitized text and no gate coverage.
+    const fallThroughParams: Record<string, unknown> = { ...params }
+    if (typeof fallThroughParams.n_evaluations === 'number') {
+      const bounded = boundParam(fallThroughParams.n_evaluations, MAX_N_EVALUATIONS)
+      if (bounded === undefined) delete fallThroughParams.n_evaluations
+      else fallThroughParams.n_evaluations = bounded
+    }
+    for (const textKey of ['problem', 'step'] as const) {
+      if (typeof fallThroughParams[textKey] === 'string') {
+        fallThroughParams[textKey] = sanitizeForVerifier(fallThroughParams[textKey] as string)
+      }
+    }
+    if (Array.isArray(fallThroughParams.steps)) {
+      fallThroughParams.steps = (fallThroughParams.steps as unknown[])
+        .map((s) => (typeof s === 'string' ? sanitizeForVerifier(s) : s))
+    }
+    return gatedRequest(deps, method, fallThroughParams)
   }
 }
 
@@ -616,7 +672,7 @@ export interface VerifierTaskManager {
   start(method: string, params: Record<string, unknown>, timeoutMs?: number): string
   status(taskId: string): { task_id: string; status: string; result?: unknown; error?: string }
   /** Long-poll: resolves as soon as the task settles, or after waitSeconds. */
-  statusWait(taskId: string, waitSeconds: number): Promise<{ task_id: string; status: string; result?: unknown; error?: string }>
+  statusWait(taskId: string, waitSeconds: number, signal?: AbortSignal): Promise<{ task_id: string; status: string; result?: unknown; error?: string }>
 }
 
 export function createVerifierTaskManager(
@@ -675,7 +731,11 @@ export function createVerifierTaskManager(
             : await (await getBridge()).request<unknown>(method, params, timeoutMs ?? defaultTimeoutMs)
           const done: VerifierTaskRecord = { ...record, status: 'done', ts: now(), result }
           records.set(taskId, done)
-          store.appendTask({ ...done, params: { duration_ms: Date.now() - started } })
+          // R3-16: keep the original params in the persisted record — it used
+          // to be REPLACED by { duration_ms }, so disk-side audit could no
+          // longer tell what the task had scored. Duration moves to its own
+          // field on the done transition.
+          store.appendTask({ ...done, duration_ms: Date.now() - started })
         } catch (error) {
           const failed: VerifierTaskRecord = {
             ...record,
@@ -696,9 +756,12 @@ export function createVerifierTaskManager(
       if (record.status === 'error') return { task_id: taskId, status: 'error', error: record.error }
       return { task_id: taskId, status: 'done', result: record.result }
     },
-    async statusWait(taskId: string, waitSeconds: number) {
+    async statusWait(taskId: string, waitSeconds: number, signal?: AbortSignal) {
       const deadline = Date.now() + Math.min(Math.max(waitSeconds, 0), 300) * 1000
       for (;;) {
+        // R3-17: honor the caller's abort — a cancelled poll used to spin
+        // for the full 300s (2s snapshots + disk reads every iteration).
+        if (signal?.aborted) return { task_id: taskId, status: 'cancelled' }
         const snapshot = this.status(taskId)
         if (snapshot.status !== 'running' || Date.now() >= deadline) return snapshot
         await new Promise((resolve) => setTimeout(resolve, 2000))
@@ -918,36 +981,67 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               if (!valid) throw new Error('verifier track `checkpoint_steps` must be a non-empty array of positive integers (1-based step indices)')
             }
             const started = Date.now()
+            // Hoist after guards: TS drops property narrowing inside closures.
+            const trackProblem = args.problem as string
+            const trackSteps = args.steps as string[]
+            // R3-4: track text is model-visible scoring input — same transport
+            // hardening as select/compare (length cap, control-char strip,
+            // injection neutralization). R3-3: n_evaluations goes through the
+            // same hard bound as every other scoring path.
+            const trackN = boundParam(args.n_evaluations, MAX_N_EVALUATIONS)
             // U-N4: track goes through the shared concurrency gate like every
             // other scoring call (it spawns real tournament work upstream).
             const trackExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('track', {
-              problem: args.problem,
-              steps: args.steps,
+              problem: sanitizeForVerifier(trackProblem),
+              steps: trackSteps.map((s) => sanitizeForVerifier(s)),
               ...(args.checkpoint_steps !== undefined ? { checkpoint_steps: args.checkpoint_steps } : {}),
               ...(model ? { model } : {}),
-              ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
+              ...(trackN !== undefined ? { n_evaluations: trackN } : {}),
+              ...(args.images ? { images: args.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(trackExec, signal) : trackExec())
+            // R3-2: track results are scores too — clamp before they reach the
+            // caller (P0-5 invariant covers every numeric reward).
+            if (result && Array.isArray(result.scores)) {
+              const clampedScores = (result.scores as unknown[]).map((v) => clamp01(v))
+              if (clampedScores.some((c) => c.clamped)) {
+                result.anomaly = 'score_out_of_range'
+                result.warning = `⚠️ track 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(result.scores)}）`
+              }
+              result.scores = clampedScores.map((c) => c.value)
+            }
             store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: args.problem, model, scores: result.scores, duration_ms: Date.now() - started })
             return asToolResult(result)
           }
           case 'progress_start': {
             if (!args.problem) throw new Error('verifier progress_start requires `problem`')
-            const result = await bridge.request<Record<string, unknown>>('progress_start', {
-              problem: args.problem,
+            // Hoist after guard (closure narrowing).
+            const psProblem = args.problem as string
+            // R3-3/R3-4/R3-5: bound n_evaluations, sanitize the problem text,
+            // and go through the shared gate (ProgressTracker.update scores).
+            const psN = boundParam(args.n_evaluations, MAX_N_EVALUATIONS)
+            const psExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('progress_start', {
+              problem: sanitizeForVerifier(psProblem),
               ...(model ? { model } : {}),
-              ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
+              ...(psN !== undefined ? { n_evaluations: psN } : {}),
+              ...(args.images ? { images: args.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
             }, undefined, signal)
+            const result = await (scoringGate ? scoringGate.run(psExec, signal) : psExec())
             store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', problem: args.problem, model, tracker_id: result.tracker_id as string, scores: [] })
             return asToolResult(result)
           }
           case 'progress_update': {
             if (!args.tracker_id) throw new Error('verifier progress_update requires `tracker_id`')
             if (!args.step) throw new Error('verifier progress_update requires `step`')
-            const result = await bridge.request<Record<string, unknown>>('progress_update', {
-              tracker_id: args.tracker_id,
-              step: args.step,
+            // Hoist after guards (closure narrowing).
+            const puTracker = args.tracker_id as string
+            const puStep = args.step as string
+            // R3-4/R3-5: sanitize the step text; the update itself scores.
+            const puExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('progress_update', {
+              tracker_id: puTracker,
+              step: sanitizeForVerifier(puStep),
             }, undefined, signal)
+            const result = await (scoringGate ? scoringGate.run(puExec, signal) : puExec())
             store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', tracker_id: args.tracker_id, step: args.step, model, scores: [result.score] })
             return asToolResult(result)
           }
@@ -996,7 +1090,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
           case 'task_status': {
             if (!args.task_id) throw new Error('verifier task_status requires `task_id`')
             const wait = Number(args.wait_seconds ?? 0)
-            return asToolResult(await tasks.statusWait(String(args.task_id), Number.isFinite(wait) ? wait : 0))
+            return asToolResult(await tasks.statusWait(String(args.task_id), Number.isFinite(wait) ? wait : 0, signal))
           }
           case 'usage': {
             const result = await bridge.request<Record<string, unknown>>('usage', {}, undefined, signal)

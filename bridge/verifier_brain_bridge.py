@@ -373,8 +373,16 @@ def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
                 n_evaluations=1,
                 client=client
             )
-            # If we get numeric rewards without error, logprobs likely worked
-            logprobs_supported = isinstance(reward_a, (int, float)) and isinstance(reward_b, (int, float))
+            # If we get numeric rewards without error, logprobs likely worked —
+            # UNLESS both rewards are exactly 0.5, the signature of an
+            # on_error="tie" masked failure (the very pattern this repo's
+            # exact-flat guard exists for). R3-15: never report "supported"
+            # on a tie-shaped probe.
+            numeric = isinstance(reward_a, (int, float)) and isinstance(reward_b, (int, float))
+            tie_shaped = numeric and reward_a == 0.5 and reward_b == 0.5
+            logprobs_supported = numeric and not tie_shaped
+            if tie_shaped:
+                logprobs_error = "probe returned tie-shaped 0.5/0.5 (likely on_error='tie' masking a logprobs failure)"
         except Exception as e:
             logprobs_error = str(e)
             # F7: fail-closed classification. Auth (401), quota (402),
