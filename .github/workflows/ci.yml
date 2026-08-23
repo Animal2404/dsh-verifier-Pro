@@ -23,12 +23,16 @@ jobs:
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
       # The host typecheck/tests import DSH peer packages (dsh-tools,
-      # cordis, ...). A global dsh install provides them; build.sh links the
-      # junctions from it (DSH_INSTALL layout).
+      # cordis, ...). Install dsh INTO the project (--no-save so package.json
+      # stays clean): npm hoists its transitive peers (@deepseek-ai/dsh-scope
+      # etc.) to the project node_modules, which the linked dsh-tools can then
+      # resolve. A GLOBAL install fails here — its nested node_modules are not
+      # visible to packages linked into the project (ERR_MODULE_NOT_FOUND
+      # @deepseek-ai/dsh-scope).
       - name: Install DSH peer bundle
         run: |
-          npm install -g --legacy-peer-deps @deepseek-ai/dsh
-          echo "DSH_INSTALL=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+          npm install --no-save --no-audit --no-fund --legacy-peer-deps @deepseek-ai/dsh
+          echo "DSH_INSTALL=$PWD/node_modules/@deepseek-ai/dsh" >> "$GITHUB_ENV"
 
       - name: Build (host + client)
         run: bash scripts/build.sh
