@@ -10,12 +10,13 @@
 |------|----------|------|
 | step ① | 诚实性修正（SECURITY.md 虚假声明 → 真实 sanitizeForVerifier 实现）、安装三连（包名/模型/Node 门槛）、编码事故修复、CHANGELOG 补 0.4.7-0.4.9 | typecheck + 测试全绿 |
 | step ② | F1 升级链 clamp + anomaly 透传（含面板 warning）；U-B1 escalationModel 接回同步路径 | 5 条升级链回归测试 |
-| steps ③④⑤⑥ | F3 NaN 协议加固、F4 images 双洞、F5 监听器泄漏、F6 共享并发闸门 + 服务缝走 runner（U-N2/U-N9）、U-N1 task_start 加固；F7-F13/F15-F17、U-B2/B3/B5/B6、U-N4/N5/N14 等批量；CI（GitHub Actions）；凭据解析加固（U-B4/U-N11/U-N7）+ history 轮转 | typecheck + **24/24** 测试 + build 全绿 + 实弹冒烟 |
+| steps ③④⑤⑥ | F3 NaN 协议加固、F4 images 双洞、F5 监听器泄漏、F6 共享并发闸门 + 服务缝走 runner（U-N2/U-N9）、U-N1 task_start 加固；F7-F13/F15-F17、U-B2/B3/B5/B6、U-N4/N5/N14 等批量；CI（GitHub Actions）；凭据解析加固（U-B4/U-N11/U-N7）+ history 轮转 | typecheck + 测试 + build 全绿 + 实弹冒烟 |
 | prompt 对账 | /bestofn 提示词三处对齐实际行为：证据链绝对路径（U-N5 同款 bug）、unknown-smoke 三态（U-N14）、anomaly/warning 转述义务（F1） | typecheck + 测试 |
+| Round C 批次 | R3-1 凭据键覆盖、F3-TS 坏帧正则、R3-2 unstable clamp 提前、R3-3~R3-6 上限/sanitize/过闸/criteria、R3-7~R3-19 批量 + tie-handling 提示词 | typecheck + **30/30** 测试（含 D-1 证据链回归 3 条）|
 
 ### 测试现状
 
-- Offline 单测：**24 pass / 0 fail**（`npm test`：并发原语 11 + 升级链回归 5 + 凭据解析 8）
+- Offline 单测：**30 pass / 0 fail**（`npm test`：并发原语 11 + 升级链回归 5 + 凭据解析 8 + 证据链回归 3 + Round D 追加中）
 - 面板回归：CDP 截图脚本（scripts/cdp_web_screenshot.mjs）机器实测
 - CI：GitHub Actions（build + host/client typecheck + 离线单测），推送后生效
 - 已知遗留（全部低优先级）：F14 死配置 maxCostPerVerification（文档已如实标注 v0.6.0 待办）、U-N8 Semaphore 死 API、statusWait 2s 轮询、i18n 层缺失——详见 CHANGELOG 0.5.0 与本地审计清单（AUDIT-*.md 不入库）

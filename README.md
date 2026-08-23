@@ -196,21 +196,19 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 
 > ⚠️ 不加 `#commit` 或 `#tag` 将始终拉取最新 main，可能引入破坏性变更。
 
-### 权重校验
+### criteria 写法（重要）
 
-`criteria` 参数支持传入权重对象，权重值必须为非负数且总和为 1.0（误差容忍 0.001）：
+`criteria` 只接受**描述对象**——每个键是标准名，值是打分标准的自然语言描述：
 
 ```json
 {
-  "Correctness": 0.5,
-  "Completeness": 0.3,
-  "Clarity": 0.2
+  "Correctness": "输出是否事实正确",
+  "Completeness": "是否完整覆盖需求",
+  "Clarity": "表达是否清晰"
 }
 ```
 
-- 权重总和不为 1.0 时，工具会报错拒绝执行
-- 权重为负数时会报错
-- 未指定权重时默认均分（兼容旧用法）
+> ⚠️ **不支持权重对象**（如 `{"Correctness": 0.5, ...}`）：llm-verifier 后端把 criteria 值当作描述文本处理，数值会被字符串化成无意义的 `"0.5"` 标准。传入全数值对象时工具会**直接报错拒绝**，请改用描述对象。若确需加权，请在问题文本（`problem`）中显式说明各维度的相对重要性。
 
 ## 参考项目
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Diagnose the 0.5-everywhere degradation.
 
 Reproduces the official call path against an OpenAI-compatible proxy and
@@ -17,9 +17,9 @@ from llm_verifier import fine_grained_reward as fgr
 
 BASE_URL = os.environ["VB_BASE_URL"]
 API_KEY = os.environ["VB_KEY"]
-MODEL = os.environ.get("VB_MODEL", "deepseek-v4-flash")
+MODEL = os.environ.get("VB_MODEL", "deepseek-v4-pro")
 
-GOOD = "人工智能不会让所有人失业。历史上每次技术革命都消灭了旧岗位、创造了新岗位：工业革命让农民进城当工人，互联网催生了程序员和电商。AI 会替代客服、翻译等重复劳动，也会创造提示词工程师、AI 训练师等新职业。医生用 AI 读片更快，但沟通仍需要人。应对之道是培训与教育改革，帮助劳动者转型，让人做机器做不到的事。总之 AI 改变工作而非消灭工作，关键在于主动适应。"
+GOOD = "浜哄伐鏅鸿兘涓嶄細璁╂墍鏈変汉澶变笟銆傚巻鍙蹭笂姣忔鎶€鏈潻鍛介兘娑堢伃浜嗘棫宀椾綅銆佸垱閫犱簡鏂板矖浣嶏細宸ヤ笟闈╁懡璁╁啘姘戣繘鍩庡綋宸ヤ汉锛屼簰鑱旂綉鍌敓浜嗙▼搴忓憳鍜岀數鍟嗐€侫I 浼氭浛浠ｅ鏈嶃€佺炕璇戠瓑閲嶅鍔冲姩锛屼篃浼氬垱閫犳彁绀鸿瘝宸ョ▼甯堛€丄I 璁粌甯堢瓑鏂拌亴涓氥€傚尰鐢熺敤 AI 璇荤墖鏇村揩锛屼絾娌熼€氫粛闇€瑕佷汉銆傚簲瀵逛箣閬撴槸鍩硅涓庢暀鑲叉敼闈╋紝甯姪鍔冲姩鑰呰浆鍨嬶紝璁╀汉鍋氭満鍣ㄥ仛涓嶅埌鐨勪簨銆傛€讳箣 AI 鏀瑰彉宸ヤ綔鑰岄潪娑堢伃宸ヤ綔锛屽叧閿湪浜庝富鍔ㄩ€傚簲銆?
 BAD = "asdkjh qwerty 12345 %%% zzzz ??? ai work job no yes maybe 42 hello world foo bar baz."
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=180)

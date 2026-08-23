@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
-"""诊断: opencode 端点 DFLASH return_logprob 400 错误的影响面"""
+﻿# -*- coding: utf-8 -*-
+"""璇婃柇: opencode 绔偣 DFLASH return_logprob 400 閿欒鐨勫奖鍝嶉潰"""
 import os
 import sys
 
@@ -18,7 +18,7 @@ try:
         candidate_a="4",
         candidate_b="5",
         criteria={"Correctness": "correct?"},
-        model="deepseek-v4-flash",
+        model="deepseek-v4-pro",
     )
     print("OK:", r)
 except Exception as e:
@@ -34,7 +34,7 @@ try:
         api_key=os.environ["OPENAI_API_KEY"],
     )
     resp = client.chat.completions.create(
-        model="deepseek-v4-flash",
+        model="deepseek-v4-pro",
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=5,
         logprobs=True,

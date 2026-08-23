@@ -96,20 +96,18 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
     }
     if (parsed && typeof parsed === 'object') {
       const obj = parsed as Record<string, unknown>
-      // Check if it's a weight object (all values are numbers)
+      // D-2: the official llm-verifier package has NO weight concept —
+      // normalize_criteria stringifies numeric values into descriptions
+      // (0.5 → "0.5"), so an all-numeric criteria object silently produces
+      // nonsense criteria ("score by criteria A described as 0.5"). The old
+      // R3-6 sum-to-1 validation enforced a constraint on a phantom feature;
+      // reject numeric objects outright with guidance toward the supported
+      // description-object form.
       const values = Object.values(obj)
       if (values.length > 0 && values.every(v => typeof v === 'number')) {
-        // R3-6: weight validation must be OUTSIDE the JSON.parse catch — the
-        // throw used to be swallowed by it (dead code), so invalid weights
-        // (negative / sum ≠ 1.0) silently went to the scorer while the README
-        // promised they would be rejected.
-        if (values.some(v => (v as number) < 0)) {
-          throw new Error('criteria weights must be non-negative')
-        }
-        const sum = values.reduce((acc, v) => acc + (v as number), 0)
-        if (Math.abs(sum - 1.0) > 0.001) {
-          throw new Error(`criteria weights must sum to 1.0 (got ${sum.toFixed(3)})`)
-        }
+        throw new Error(
+          'criteria as a numeric/weight object is not supported: the llm-verifier backend treats criteria values as descriptions, so weights would silently become meaningless strings. Use a description object instead, e.g. {"Correctness": "checks the output is factually right"}',
+        )
       }
       return obj as Criteria
     }
@@ -363,7 +361,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       // degrade to the first-pass result (like select), never discard it.
       if (reps.length < 2) {
         const msg = error instanceof Error ? error.message : String(error)
-        deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'escalation_failed' })
+        deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'escalation_failed' })
         return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${msg}` }
       }
       process.stderr.write(`[verifier-brain] escalation rep ${i} failed, continuing with ${reps.length} reps: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -383,7 +381,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   // Direction-inconsistent: report raw, never silently average.
   if (agreeing < Math.ceil(kUsed / 2)) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'unstable' })
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'unstable' })
     return {
       signal: 'unstable',
       escalated: true,
@@ -547,7 +545,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
   } catch (error) {
     // U-B3: degraded-to-k1 is still a real scored call — log it.
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
 
@@ -567,7 +565,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
 
   if (escalated.index !== k1.index) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'unstable' })
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'unstable' })
     return {
       signal: 'unstable',
       escalated: true,
@@ -663,7 +661,32 @@ export function createEscalationRunner(deps: EscalationDeps) {
       fallThroughParams.steps = (fallThroughParams.steps as unknown[])
         .map((s) => (typeof s === 'string' ? sanitizeForVerifier(s) : s))
     }
-    return gatedRequest(deps, method, fallThroughParams)
+    const raw = await gatedRequest<Record<string, unknown>>(deps, method, fallThroughParams)
+    // D-4: track/progress results are scores too — the async task path and
+    // the service seam used to return them RAW (unclamped), letting
+    // out-of-range rewards leak past the P0-5 invariant (the sync tool path
+    // already clamps; the runner fall-through did not).
+    if (raw && typeof raw === 'object' && Array.isArray((raw as Record<string, unknown>).scores)) {
+      const out = raw as Record<string, unknown>
+      const clamped = (out.scores as unknown[]).map((v) => clamp01(v))
+      if (clamped.some((c) => c.clamped)) {
+        out.anomaly = out.anomaly ?? 'score_out_of_range'
+        out.warning = `⚠️ ${method} 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(out.scores)}）`
+      }
+      out.scores = clamped.map((c) => c.value)
+      return out
+    }
+    if (raw && typeof raw === 'object' && typeof (raw as Record<string, unknown>).score === 'number') {
+      const out = raw as Record<string, unknown>
+      const c = clamp01(out.score)
+      if (c.clamped) {
+        out.anomaly = out.anomaly ?? 'score_out_of_range'
+        out.warning = `⚠️ ${method} 返回越界分已裁剪到 [0,1]（raw: ${String(out.score)}）`
+      }
+      out.score = c.value
+      return out
+    }
+    return raw
   }
 }
 
@@ -888,7 +911,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
     const dispose = ctx.tools.register(defineTool({
       name: 'verifier',
       description:
-        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory per step), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads), task_status (poll; pass wait_seconds=120 instead of blind-polling). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
+        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory per step), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
       parameters: {
         action: {
           type: 'string',
@@ -1081,6 +1104,15 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
                 params.criteria = JSON.parse(params.criteria as string)
               } catch {
                 // Keep the raw string; llm-verifier may accept a preset name.
+              }
+            }
+            // D-3: the async path must apply the same numeric-criteria
+            // rejection as the sync path (D-2) — it used to bypass parseCriteria
+            // entirely and silently ship weight objects to the phantom feature.
+            if (params.criteria && typeof params.criteria === 'object' && !Array.isArray(params.criteria)) {
+              const cvals = Object.values(params.criteria as Record<string, unknown>)
+              if (cvals.length > 0 && cvals.every(v => typeof v === 'number')) {
+                return { error: 'task_start: criteria as a numeric/weight object is not supported (the backend treats values as descriptions). Use a description object like {"Correctness": "checks the output"}' }
               }
             }
             if (defaultModel && params.model === undefined) params.model = defaultModel

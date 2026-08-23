@@ -4,9 +4,27 @@
 
 ## [0.5.0] - 2026-08-23
 
-Best-of-N 三方审计（Round A/B）全部 P1 修复 + P2 批量清零。
+Best-of-N 三方审计（Round A/B）全部 P1 修复 + P2 批量清零 + Round C 复审计修复。
 
-### Fixed
+### Fixed（Round C 审计批次）
+- **R3-1** 凭据解析：provider 节子键需匹配 key/token/secret 才映射（base_url 不再覆盖 API key）；顶层键复位 section（跨节污染消除）
+- **F3-TS** 坏帧关联正则兼容字符串 id（原为死代码），且仅 `{` 开头行才尝试关联（不误伤日志）
+- **R3-2** select unstable 分支 clamp 提前——越界分不再泄漏到模型上下文/面板
+- **R3-3/R3-4/R3-5** F15 上限与 sanitize 下沉 runner fall-through + 同步 track/progress；progress_* 纳入共享并发闸门
+- **R3-6** parseCriteria 权重校验不再被 JSON.parse 的 catch 吞掉（README「报错拒绝」契约兑现）
+- **R3-7** service.progressStart 注入 defaultModel；**R3-8** clamp01(null)→NaN（被洗白的 NaN 不再变确定 0 分）
+- **R3-9/R3-10** smoke 静态页真正截图；ERR 采集器会话级注入一次（消除 k× 错误膨胀）
+- **R3-11** /bestofn 冠军索引非法时显式报错（不再打印 undefined 冠军）
+- **R3-12** 分级评分 history 记实际升级模型（成功路径）
+- **R3-14** 升级轮始终使用独立缓存文件（消除 rep-0 命中 k1 导致的权重偏置）
+- **R3-15** probe 对 tie 形 0.5/0.5 判不支持（不再误报 logprobs 可用）
+- **R3-16** done 记录保留原始 params（duration_ms 独立字段）
+- **R3-17** statusWait 响应 AbortSignal（取消不再空转 300s）
+- **R3-18** 轮转原子写（tmp+rename）
+- **R3-19** build_evidence 直喂 .smoke.json 时从 `file` 字段派生哈希名；service select/compare 强制 criteria（对齐 U-N1）；README engines/action 计数/模型推荐修正；版本号 0.5.0
+- 提示词：tie-handling 协议显式化（select flat 且 compare 复核仍在噪声带 → 不发明冠军、全量合并）
+
+### Fixed（Round A/B 批次）
 - **F1** 升级评分全链路 clamp01：升级轮越界分逐轮裁剪，anomaly/warning 透传到 composite 与面板（此前仅首评设防）
 - **F2** SECURITY.md 虚假声明纠正：sanitizeForVerifier 从未存在 → 真实实现传输层消毒器（10k 截断 + 控制符剥离 + 注入短语中性化）并接入 compare/select 入参
 - **F3** NaN/Infinity 不再打穿 stdio JSON-Lines 协议：`_jsonable` 洗非有限浮点 + `allow_nan=False` 兜底 + TS 侧坏帧按 id 关联立即 reject（此前请求假死到全额超时）

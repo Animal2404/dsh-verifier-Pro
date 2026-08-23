@@ -141,11 +141,33 @@ def _sanitize_images(kwargs: dict[str, Any], method: str) -> None:
     )
 
 
+# D-9: the bridge relies on post-0.2.0 official APIs (token_usage() hook,
+# ProgressTracker signatures, tagged-call path). Reject older installs loudly.
+_MIN_LLM_VERIFIER = (0, 2, 0)
+
+
+def _version_tuple(version: str) -> tuple[int, int, int] | None:
+    """'0.2.0' / '0.2.0rc1' → (0,2,0); unparseable → None."""
+    import re
+    m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", version)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
 def _require_library() -> None:
     if llm_verifier is None:
         raise RuntimeError(
-            "llm-verifier is not installed. Run: pip install llm-verifier"
+            "llm-verifier is not installed. Run: pip install 'llm-verifier>=0.2.0'"
             + (f" (import error: {_IMPORT_ERROR})" if _IMPORT_ERROR else "")
+        )
+    ver = getattr(llm_verifier, "__version__", "") or ""
+    vt = _version_tuple(ver)
+    if vt is None:
+        raise RuntimeError(f"llm-verifier version unparseable: {ver!r} — please upgrade: pip install -U 'llm-verifier>=0.2.0'")
+    if vt < _MIN_LLM_VERIFIER:
+        raise RuntimeError(
+            f"llm-verifier {ver} is too old (need >= 0.2.0). Run: pip install -U 'llm-verifier>=0.2.0'"
         )
 
 
@@ -429,7 +451,6 @@ def _write_response(stream: TextIO, payload: dict[str, Any]) -> None:
     # (handled by _process_line) instead of a corrupt frame.
     stream.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
     stream.flush()
-    stream.flush()
 
 
 def _process_line(line: str, out: TextIO) -> None:
@@ -448,9 +469,9 @@ def _process_line(line: str, out: TextIO) -> None:
         if handler is None:
             raise ValueError(f"unknown method: {method!r}")
         result = handler(params)
-        _write_response(out, {"id": req_id, "ok": True, "result": result})
+        _write_response_locked(out, {"id": req_id, "ok": True, "result": result})
     except Exception as exc:
-        _write_response(out, {
+        _write_response_locked(out, {
             "id": req_id,
             "ok": False,
             "error": {"type": type(exc).__name__, "message": str(exc)},

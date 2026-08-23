@@ -71,21 +71,27 @@ function readText(input) {
 
 function resolveRelated(base) {
   const stem = basename(base).replace(/\.(smoke|describe)\.json$/, '').replace(/\.[^.]+$/, '')
-  const candidates = {
-    smoke: [
-      SMOKE_DIR && join(SMOKE_DIR, stem + '.smoke.json'),
-      join(dirname(base), stem + '.smoke.json'),
-      base.endsWith('.smoke.json') ? base : null,
-    ].filter(Boolean),
-    describe: [
-      DESCRIBE_DIR && join(DESCRIBE_DIR, stem + '.describe.json'),
-      join(dirname(base), stem + '.describe.json'),
-      base.endsWith('.describe.json') ? base : null,
-    ].filter(Boolean),
+  // D-1: F10 hash naming means smoke/describe files are written as
+  // `<stem>-<hash8>.smoke.json`, not `<stem>.smoke.json` — the old hashless
+  // lookup silently missed them, so evidence blocks rendered "(无冒烟证据)"
+  // in the standard evidence_chain / /bestofn flow. Try the HASHED name
+  // (artifactName matches smoke.mjs) first, then fall back to the hashless
+  // stem for legacy/manual layouts.
+  const hashed = artifactName(base)
+  const stemLookups = [hashed, stem]
+  const smokePaths = []
+  const describePaths = []
+  for (const key of stemLookups) {
+    if (SMOKE_DIR) smokePaths.push(join(SMOKE_DIR, key + '.smoke.json'))
+    smokePaths.push(join(dirname(base), key + '.smoke.json'))
+    if (DESCRIBE_DIR) describePaths.push(join(DESCRIBE_DIR, key + '.describe.json'))
+    describePaths.push(join(dirname(base), key + '.describe.json'))
   }
+  if (base.endsWith('.smoke.json')) smokePaths.push(base)
+  if (base.endsWith('.describe.json')) describePaths.push(base)
   return {
-    smoke: candidates.smoke.map(readJson).find(Boolean) ?? null,
-    describe: candidates.describe.map(readJson).find(Boolean) ?? null,
+    smoke: smokePaths.map(readJson).find(Boolean) ?? null,
+    describe: describePaths.map(readJson).find(Boolean) ?? null,
   }
 }
 
@@ -130,7 +136,11 @@ function artifactName(input) {
       if (typeof rec.file === 'string' && rec.file) base = rec.file
     } catch { /* fall back to the input path */ }
   }
-  const stem = basename(base).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+  // D-1b: stem rule must MATCH smoke.mjs exactly — strip the LAST extension
+  // (smoke uses /\\.[^.]+$/), NOT a whitelist. A whitelist diverged for
+  // non-whitelisted extensions (e.g. .md) and produced names that could
+  // never match the smoke file.
+  const stem = basename(base).replace(/\.[^.]+$/, '')
   return `${stem}-${shortHash(resolve(base))}`
 }
 
@@ -160,8 +170,12 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true })
   const blocks = INPUTS.map((input) => {
     const name = artifactName(input)
-    // 逐候选 summary 优先（--summary name=text），否则全局
-    const summary = per.has(name) ? per.get(name) : globalText
+    // D-1: users key per-candidate summaries by the RAW name (e.g.
+    // `--summary 甲=...`), but block names carry the F10 hash suffix
+    // (`甲-<hash8>`) — the hashed key never matched before, silently
+    // dropping every per-candidate summary. Match BOTH forms.
+    const stem = basename(input).replace(/\.(smoke|describe)\.json$/, '').replace(/\.[^.]+$/, '')
+    const summary = per.has(name) ? per.get(name) : per.has(stem) ? per.get(stem) : globalText
     return buildBlock(input, summary)
   })
   if (AS_JSON) {

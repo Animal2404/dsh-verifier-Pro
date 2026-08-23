@@ -59,6 +59,8 @@ const IS_WIN = process.platform === 'win32';
 const MIN_NODE_MAJOR = 18;      // 项目要求的 Node 最低大版本
 const PY_PKG = 'llm-verifier';  // venv 内必需的 Python 包名
 const PY_MOD = 'llm_verifier';  // 对应的 import 模块名
+// D-9: the bridge needs post-0.2.0 APIs (token_usage hook, tagged path).
+const PY_PKG_REQ = 'llm-verifier>=0.2.0';
 
 /** 【嫁接 A3】--fix 分型错误码表 */
 const EXIT = {
@@ -985,8 +987,8 @@ function runFix(root) {
       run(venv.python, ['-m', 'ensurepip', '--upgrade'], { inherit: true, timeoutMs: 180_000 });
     }
     console.log(`  ${cyan('·')} 即将执行（联网下载，可能需要几分钟）：`);
-    console.log(gray(`      > ${q(venv.python)} -m pip install ${PY_PKG}`));
-    const r = run(venv.python, ['-m', 'pip', '--disable-pip-version-check', 'install', PY_PKG], {
+    console.log(gray(`      > ${q(venv.python)} -m pip install "${PY_PKG_REQ}"`));
+    const r = run(venv.python, ['-m', 'pip', '--disable-pip-version-check', 'install', PY_PKG_REQ], {
       inherit: true,
       timeoutMs: 900_000,
     });
@@ -995,7 +997,7 @@ function runFix(root) {
       console.log(`  ${MARK_BAD} pip 安装失败${timedOut ? '（超时）' : ''}。`);
       // 【嫁接 B3】给出清华镜像源的手动完整命令
       console.log(`  ${cyan('·')} 国内网络可直接用清华镜像源手动安装：`);
-      console.log(gray(`      ${q(venv.python)} -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple ${PY_PKG}`));
+      console.log(gray(`      ${q(venv.python)} -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple "${PY_PKG_REQ}"`));
       console.log(`  ${cyan('·')} 或设置镜像环境变量后重试：`);
       console.log(`      CMD：        set PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`);
       console.log(`      PowerShell： $env:PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"`);
