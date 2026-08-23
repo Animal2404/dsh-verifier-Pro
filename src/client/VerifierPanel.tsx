@@ -118,20 +118,18 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     : isError ? { text: BADGE_LABELS.error!, colorToken: 'var(--dsw-alias-state-error-primary)' }
     : signal === 'degraded' ? { text: BADGE_LABELS.degraded!, colorToken: 'var(--dsw-alias-state-error-primary)' }
     : signal === 'flat' || signal === 'unstable' ? { text: BADGE_LABELS[signal] ?? signal, colorToken: 'var(--dsw-alias-state-warn-label)' }
-    : signal === 'majority' ? { text: '多数短路判胜', colorToken: 'var(--dsw-alias-state-warn-label)' }
     : escalated ? { text: `分差小 · 已评${String(data?.k_used ?? '?')}次`, colorToken: 'var(--dsw-alias-brand-primary)' }
     : data ? { text: BADGE_LABELS.ok!, colorToken: 'var(--dsw-alias-state-success-primary)' }
     : { text: ACTION_LABELS[action] ?? action, colorToken: 'var(--dsw-alias-label-tertiary)' }
 
   // 大白话解释系统：每个非绿色徽章都配一句"这是什么意思 + 建议怎么办"。
   // 宿主若附带了更具体的 warning/message，会作为第二行追加在同一张说明卡里。
-  const stateKey: 'running' | 'error' | 'degraded' | 'flat' | 'unstable' | 'majority' | 'escalated' | 'ok' | 'plain' =
+  const stateKey: 'running' | 'error' | 'degraded' | 'flat' | 'unstable' | 'escalated' | 'ok' | 'plain' =
     running ? 'running'
     : isError ? 'error'
     : signal === 'degraded' ? 'degraded'
     : signal === 'flat' ? 'flat'
     : signal === 'unstable' ? 'unstable'
-    : signal === 'majority' ? 'majority'
     : escalated ? 'escalated'
     : data ? 'ok'
     : 'plain'
@@ -141,7 +139,6 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     degraded: '⚠️ 本次所有候选都得 0.5 分——这是评分批量失败的特征（常见原因：模型不支持 logprob 打分）。分数不可用于排名，请更换模型重试或人工复核。',
     flat: '几个方案得分几乎一样，排名没有参考意义——建议用「对比评审」对前两名单独复核，或细化评审标准。',
     unstable: '多次独立评审的赢家不一致，说明模型也拿不准——建议人工复核后再决定，不要自动采信本次结果。',
-    majority: '多数候选字节相同——按多数短路判胜（未跑锦标赛，未计算质量分）。非多数候选不代表差，需要时用「对比评审」单独评估。',
     escalated: `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`,
   }
   // F1 透传：带 anomaly/warning 的"正常/升级"结果也必须有可见警告——
@@ -156,25 +153,22 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
     : null
   // VAL 验证自主等级（P1-②，借鉴 math_agent 的 L0-L5 框架，取前三级）：
   //   L0 = LLM 判断（评分就是模型的判断，无外部锚定）
-  //   L1 = 确定性规则介入（clamp 裁剪 / anomaly 护栏 / exact-flat 检测 / 多数短路等机器规则）
+  //   L1 = 确定性规则介入（clamp 裁剪 / anomaly 护栏 / exact-flat 检测等机器规则）
   //   L2 = 客观真值锚定（/bestofn 冒烟等机器验证的客观证据——面板层无此上下文，由报告层标注）
   // 让用户一眼分辨「这分是 LLM 说的，还是机器规则保底的」。
-  const valLevel = hasAnomaly || signal === 'majority' ? 'L1' : 'L0'
+  const valLevel = hasAnomaly ? 'L1' : 'L0'
   const valNote = `验证锚定: ${valLevel}（${valLevel === 'L1' ? '确定性规则介入——机器规则已生效' : 'LLM 判断——无外部锚定，仅供参考'}）`
   const noticeText = STATE_NOTES[stateKey]
     ?? (hasAnomaly
       ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
       : null)
   // 宿主的原始细节（更技术性）作为补充行；避免与统一模板重复。
-  // majority 短路时 STATE_NOTES 已完整说明，跳过 raw warning 避免重复刷屏。
-  const hostDetail = signal === 'majority'
-    ? null
-    : typeof data?.warning === 'string'
+  const hostDetail = typeof data?.warning === 'string'
       ? data.warning
       : typeof data?.message === 'string'
         ? data.message
         : null
-  const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable' || stateKey === 'majority'
+  const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable'
 
   // 候选字母标：A/B/C/D…（超过 8 个回退数字）。
   const letterAt = (i: number): string => 'ABCDEFGH'[i] ?? String(i + 1)
@@ -204,13 +198,6 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
               {letterAt(i)}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
             </span>
           ))}
-        </div>
-      )}
-
-      {/* majority 短路：无质量分（scores=null），但必须显示胜者是哪个候选 */}
-      {!running && signal === 'majority' && index !== null && (
-        <div style={styles.scores}>
-          <span style={styles.scoreTop}>🏆 多数胜者: {letterAt(index)}</span>
         </div>
       )}
 

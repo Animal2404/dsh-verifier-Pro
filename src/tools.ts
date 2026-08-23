@@ -485,37 +485,6 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed, images: p.images ?? null })
   const started = Date.now()
 
-  // uson1x majority-voting shortcut (deep-read engine.js:375-384): when a
-  // strict majority of candidates are byte-identical (post-sanitize), the
-  // tournament is redundant — the majority IS the winner. Saves a full PPT
-  // round on degenerate inputs (e.g. /bestofn with duplicate artifacts).
-  {
-    const counts = new Map<string, number>()
-    for (const c of p.candidates) counts.set(c, (counts.get(c) ?? 0) + 1)
-    let majorityText: string | undefined
-    let majorityCount = 0
-    for (const [text, n] of counts) {
-      if (n > majorityCount) { majorityText = text; majorityCount = n }
-    }
-    if (majorityText !== undefined && majorityCount > p.candidates.length / 2) {
-      const majorityIndex = p.candidates.indexOf(majorityText)
-      // 诚实语义：短路只声明「多数候选字节相同 → 不跑锦标赛」，不产出质量分。
-      // 非多数候选（如 D）可能同样是正确解——绝不能给 0.000 这种「完全失败」
-      // 的假分数。scores/ranking 置 null，由面板以独立 signal 呈现。
-      const composite = {
-        index: majorityIndex,
-        scores: null,
-        ranking: null,
-        escalated: false,
-        cached: false,
-        signal: 'majority' as const,
-        warning: `候选 ${majorityCount}/${p.candidates.length} 字节相同——多数短路判胜（uson1x majority-voting），未跑锦标赛、未计算质量分；非多数候选不代表差，请用 compare 单独评估`,
-      }
-      deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: majorityIndex, scores: null, duration_ms: Date.now() - started, note: 'majority_shortcut' })
-      return composite
-    }
-  }
-
   // 官方 score cache（降本1，第二轮审计修正）：官方 cache_key = crit|task|索引|rep，
   // 不含 problem/候选内容/model —— 全局持久化会造成跨任务投毒（audit2 report-b 实证）。
   // 修正：cache 文件改为【每次调用独立临时文件】——只保留单次锦标赛内
