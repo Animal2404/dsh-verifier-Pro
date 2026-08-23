@@ -80,10 +80,16 @@ bash scripts/build.sh
 | `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
-> ⚠️ **2026-08-22 起勿用 opencode 的 `deepseek-v4-flash` 打分**：上游为该模型启用了
-> DFLASH 投机解码，拒绝一切 logprob 请求（400 "does not support return_logprob"）。
-> 普通对话不受影响，但 verifier 打分必需 logprobs。同端点实测可用替代：
-> `deepseek-v4-flash-vision-exp`、`qwen3.7-plus`、`qwen3.6-plus`。
+> 📌 **模型评分路径（v0.5.0）**：
+> - **logprobs 路径（精确）**：`deepseek-v4-flash-vision-exp`（默认）、`qwen3.7-plus`、`qwen3.6-plus`。
+> - **literal-mc 路径（采样近似，模型不返回 logprobs 时的降级）**：`minimax-m3`、`minimax-m2.7`、
+>   `mimo-v2.5-pro`、`muse-spark-1.2-contributor`、`deepseek-v4-flash`（桥自动路由，见下）。
+> - `deepseek-v4-flash` 本身仍不接受 logprobs 请求（DFLASH 400），但桥会**自动走 literal-mc
+>   采样评分**（无 logprobs 直调 + 读评分标签 + K 次采样平均），因此可用——不再是「勿用」。
+>
+> 要求：logprobs 路径的模型必须支持 **token 级 logprobs 返回**（细粒度 reward 的根基）。
+> literal-mc 路径的模型则要求能按提示词输出 `<score_X>` 字母标签（桥自动探测/按档案路由）。
+> 面板会标注本次评分用的是哪条路径；精细判别建议用 logprobs 模型。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
 `.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>` 可验证你的端点是否返回 logprobs；
