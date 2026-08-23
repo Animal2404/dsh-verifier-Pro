@@ -151,6 +151,13 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
   const mcNote = scoreMode === 'literal-mc'
     ? `🎲 采样近似分：模型不返回 logprobs，本分是 ${String(data?.k_used ?? data?.n_evaluations ?? '多次')} 次评分标签采样平均——方向可信，精细分差请用 logprobs 模型复核。`
     : null
+  // VAL 验证自主等级（P1-②，借鉴 math_agent 的 L0-L5 框架，取前三级）：
+  //   L0 = LLM 判断（评分就是模型的判断，无外部锚定）
+  //   L1 = 确定性规则介入（clamp 裁剪 / anomaly 护栏 / exact-flat 检测等机器规则）
+  //   L2 = 客观真值锚定（/bestofn 冒烟等机器验证的客观证据——面板层无此上下文，由报告层标注）
+  // 让用户一眼分辨「这分是 LLM 说的，还是机器规则保底的」。
+  const valLevel = hasAnomaly ? 'L1' : 'L0'
+  const valNote = `验证锚定: ${valLevel}（${valLevel === 'L1' ? '确定性规则介入——clamp/护栏已生效' : 'LLM 判断——无外部锚定，仅供参考'}）`
   const noticeText = STATE_NOTES[stateKey]
     ?? (hasAnomaly
       ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
@@ -212,6 +219,10 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && mcNote && (
         <div style={styles.noticeDetail}>{mcNote}</div>
+      )}
+
+      {!running && !isError && valNote && (
+        <div style={styles.noticeDetail}>{valNote}</div>
       )}
 
       {expanded && (

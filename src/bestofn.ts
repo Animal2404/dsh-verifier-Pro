@@ -113,6 +113,51 @@ function smokeOk(outDir: string, name: string): boolean | undefined {
   }
 }
 
+/**
+ * P1-① 声明-证据对照（借鉴 attest / ai-validator，机械可核对的 v1 范围）：
+ * 把候选自述（--summary）与冒烟证据（运行时观察）逐条核对，抓「自述与证据
+ * 矛盾」的候选——AI judge 容易被流畅的自述带偏（Gaming the Judge: 只重写
+ * 推理不改事实，误报率可升 90%），这里是机器级兜底。
+ *
+ * 可机械检测的矛盾（诚实范围，不做语义理解）：
+ *   1. 负面自述矛盾：自述含负面断言（失败/不工作/未实现/报错/无法），
+ *      但冒烟 ok=true 且无错误 → 自述自我贬低与实际证据冲突。
+ *   2. 错误遗漏：冒烟显示错误（错误:/退出码≠0），但自述声称全部成功
+ *      （全部通过/无错误/完美/成功）→ 自述掩盖证据中的失败。
+ *   3. 证据缺失：自述有强断言，但冒烟段是"(无冒烟证据)" → 无据背书。
+ * 返回 null=一致；否则返回冲突描述。
+ */
+/** 导出供测试（P1-① 声明-证据对照的机械核对逻辑）。 */
+export function crossCheckClaimEvidence(blockText: string): string | null {
+  const summaryMatch = /## 功能摘要（候选自述）\r?\n([\s\S]*?)\r?\n## 运行时观察/.exec(blockText)
+  const smokeMatch = /## 运行时观察（冒烟测试，非候选自述）\r?\n([\s\S]*?)(?:\r?\n## |$)/.exec(blockText)
+  const summary = summaryMatch ? summaryMatch[1].trim() : ''
+  const smoke = smokeMatch ? smokeMatch[1].trim() : ''
+  if (!summary || !smoke) return null // 缺段无法核对（unknown 已排除）
+
+  const hasSmokeEvidence = !smoke.includes('(无冒烟证据)')
+  const smokeFailed = smoke.includes('冒烟: ❌') || /退出码: [1-9]/.test(smoke) || smoke.includes('错误:')
+  const smokeHasErrors = /错误:|❌/.test(smoke)
+
+  // 1) 负面自述 vs 通过证据
+  if (hasSmokeEvidence && !smokeFailed) {
+    const negativeClaims = /(失败|不工作|未实现|无法|报错|不能|没有实现|有 bug|不完整)/.test(summary)
+    if (negativeClaims) {
+      return '自述含负面断言（失败/未实现等），但冒烟通过且无错误——自述自我贬低与实际证据矛盾'
+    }
+  }
+  // 2) 自述声称全对 vs 证据有错误
+  const claimsAllGood = /(全部通过|无错误|完美|全部成功|零错误|完全正确|都通过)/.test(summary)
+  if (claimsAllGood && smokeHasErrors) {
+    return '自述声称全部成功/无错误，但冒烟证据包含错误——自述掩盖证据中的失败'
+  }
+  // 3) 自述强断言但证据缺失
+  if (!hasSmokeEvidence && summary.length > 0) {
+    return '自述有功能断言，但冒烟段无证据（(无冒烟证据)）——无据背书，分数仅供参考'
+  }
+  return null
+}
+
 /** F16: /bestofn spawns one member per candidate — keep fan-out sane. */
 const MAX_BESTOFN_N = 8
 
@@ -265,9 +310,20 @@ export function registerBestOfNCommand(ctx: Context, deps: {
 
       // 3) select 优选（含自适应 K）
       try {
+        // P1-① 声明-证据对照：评分前把每个候选的自述与冒烟证据机械核对，
+        // 矛盾候选的文本附上核对结论（评分模型会看到），并在报告中显式标注。
+        const crossChecks = new Map<string, string | null>(
+          survivors.map((b) => [b.name, crossCheckClaimEvidence(b.text)]),
+        )
+        const conflicting = survivors.filter((b) => crossChecks.get(b.name) != null)
+        const annotate = (text: string, name: string): string => {
+          const conflict = crossChecks.get(name)
+          if (!conflict) return text
+          return `${text}\n\n⚠️ [声明-证据核对] ${conflict}——该候选自述与机器证据矛盾，评分时请降低对其自述的信任、以证据为准。`
+        }
         const selected = await deps.runner('select', {
           problem: 'Which candidate is best, judged on runtime evidence (not self-claims)?',
-          candidates: survivors.map((b) => b.text),
+          candidates: survivors.map((b) => annotate(b.text, b.name)),
           criteria: {
             Correctness: 'Does it run without crashing and behave correctly (per smoke evidence)?',
             Evidence: 'Strength of verifiable runtime/visual evidence',
@@ -320,6 +376,19 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         if (crashInfo2) lines.push(`\n${crashInfo2}`)
         lines.push(`\n🏆 冠军: ${champion}`)
         lines.push(`排名: ${survivors.map((s, i) => `${i + 1}.${s.name} (${scores[i] !== undefined ? scores[i].toFixed(4) : '?'})`).join('  ')}`)
+        // VAL 验证自主等级（P1-②）：幸存者都过了机器冒烟（ok=true）= 客观真值锚定 L2；
+        // 但排名分本身仍是 LLM 判断（L0）。如实分层，用户可分辨「证据是机器证的，
+        // 分数是模型评的」。
+        lines.push(`\n🔒 验证锚定: 证据 L2（冒烟=机器验证的客观真值）· 评分 L0（LLM 判断）`)
+        // P1-① 声明-证据对照结果（矛盾候选显式标注，警示用户勿轻信其自述）
+        if (conflicting.length > 0) {
+          lines.push(`\n🔍 声明×证据核对: ⚠️ ${conflicting.length} 个候选自述与冒烟证据矛盾——`)
+          for (const b of conflicting) {
+            lines.push(`  · ${b.name}: ${crossChecks.get(b.name)}`)
+          }
+        } else {
+          lines.push(`\n🔍 声明×证据核对: 全部一致（无自述与证据矛盾）`)
+        }
         if (selected.signal === 'flat') lines.push(`\n⚠️ 排名无信号（flat），建议用 compare 复核前二名`)
         if (selected.escalated) {
           lines.push(`📈 自适应升级: ${selected.k_used} 次评估取平均（margin ${selected.margin_before !== undefined ? Number(selected.margin_before).toFixed(3) : '?'} → ${selected.margin_after !== undefined ? Number(selected.margin_after).toFixed(3) : '?'}）`)
