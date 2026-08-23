@@ -499,17 +499,19 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     }
     if (majorityText !== undefined && majorityCount > p.candidates.length / 2) {
       const majorityIndex = p.candidates.indexOf(majorityText)
-      const majorityRewards = p.candidates.map((c) => (c === majorityText ? 1 : 0))
+      // 诚实语义：短路只声明「多数候选字节相同 → 不跑锦标赛」，不产出质量分。
+      // 非多数候选（如 D）可能同样是正确解——绝不能给 0.000 这种「完全失败」
+      // 的假分数。scores/ranking 置 null，由面板以独立 signal 呈现。
       const composite = {
         index: majorityIndex,
-        scores: majorityRewards,
-        ranking: [...majorityRewards.keys()].sort((a, b) => majorityRewards[b] - majorityRewards[a]),
+        scores: null,
+        ranking: null,
         escalated: false,
         cached: false,
-        signal: 'flat' as const,
-        warning: `候选 ${majorityCount}/${p.candidates.length} 字节相同——按多数直接判胜（uson1x majority-voting 短路），未跑锦标赛`,
+        signal: 'majority' as const,
+        warning: `候选 ${majorityCount}/${p.candidates.length} 字节相同——多数短路判胜（uson1x majority-voting），未跑锦标赛、未计算质量分；非多数候选不代表差，请用 compare 单独评估`,
       }
-      deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: majorityIndex, scores: majorityRewards, duration_ms: Date.now() - started, note: 'majority_shortcut' })
+      deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: majorityIndex, scores: null, duration_ms: Date.now() - started, note: 'majority_shortcut' })
       return composite
     }
   }

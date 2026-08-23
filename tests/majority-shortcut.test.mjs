@@ -26,16 +26,16 @@ const baseDeps = (bridge, esc = {}) => ({
   budgetMs: () => 1_800_000,
 })
 
-test('uson1x majority shortcut: 多数候选字节相同 → 直接判胜，不调桥', async () => {
+test('uson1x majority shortcut: 多数候选字节相同 → 判胜但不伪造质量分', async () => {
   const bridge = fakeBridge([]) // 无脚本 —— 若被调用会抛错
   const run = createEscalationRunner(baseDeps(bridge))
   const out = await run('select', {
     problem: 'p-maj', candidates: ['same', 'same', 'same', 'different'],
   })
   assert.equal(out.index, 0, '多数候选（same×3）应判胜')
-  assert.equal(out.scores[0], 1, '多数候选得 1 分')
+  assert.equal(out.signal, 'majority', '独立 signal，不与 flat 混')
+  assert.equal(out.scores, null, '不得伪造质量分（非多数候选不是 0 分）')
   assert.equal(bridge.calls.length, 0, '不应调用桥（短路）')
-  assert.equal(out.note ?? out.warning?.includes('多数'), undefined || true, '有说明')
   assert.match(out.warning ?? '', /多数/, '应带多数短路说明')
 })
 
