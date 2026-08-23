@@ -1,6 +1,7 @@
 import React from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ToolCallOwnerProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import { extractPanel, derivePanelState } from './panelLogic.js'
 
 /**
  * Verifier result card — keyed `tool.call.toolview` view for the wire tool
@@ -99,80 +100,25 @@ const BADGE_LABELS: Record<string, string> = {
 
 export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
-  const { action, data, isError, running } = React.useMemo(
-    () => extract(props.toolName, props.block),
+  const extracted = React.useMemo(
+    () => extractPanel(props.toolName, props.block),
     [props.toolName, props.block],
   )
-
-  const escalated = data?.escalated === true
-  const signal = typeof data?.signal === 'string' ? data.signal : null
+  const { action, data, running, isError } = extracted
+  // GUI 状态推导全部委托给纯逻辑模块（panelLogic）——可测试、与渲染解耦。
+  const panel = React.useMemo(() => derivePanelState(extracted, action), [extracted, action])
+  const { stateKey, badgeText, isWarn, valNote, mcNote, noticeText, hostDetail } = panel
 
   const index = typeof data?.index === 'number' ? data.index : null
   const scores = Array.isArray(data?.scores) ? (data.scores as number[]) : null
   const rewardA = typeof data?.reward_a === 'number' ? data.reward_a : null
   const rewardB = typeof data?.reward_b === 'number' ? data.reward_b : null
 
-  type Badge = { text: string; colorToken: string }
-  const badge: Badge =
-    running ? { text: '评分中…', colorToken: 'var(--dsw-alias-label-tertiary)' }
-    : isError ? { text: BADGE_LABELS.error!, colorToken: 'var(--dsw-alias-state-error-primary)' }
-    : signal === 'degraded' ? { text: BADGE_LABELS.degraded!, colorToken: 'var(--dsw-alias-state-error-primary)' }
-    : signal === 'flat' || signal === 'unstable' ? { text: BADGE_LABELS[signal] ?? signal, colorToken: 'var(--dsw-alias-state-warn-label)' }
-    : escalated ? { text: `分差小 · 已评${String(data?.k_used ?? '?')}次`, colorToken: 'var(--dsw-alias-brand-primary)' }
-    : data ? { text: BADGE_LABELS.ok!, colorToken: 'var(--dsw-alias-state-success-primary)' }
-    : { text: ACTION_LABELS[action] ?? action, colorToken: 'var(--dsw-alias-label-tertiary)' }
-
-  // 大白话解释系统：每个非绿色徽章都配一句"这是什么意思 + 建议怎么办"。
-  // 宿主若附带了更具体的 warning/message，会作为第二行追加在同一张说明卡里。
-  const stateKey: 'running' | 'error' | 'degraded' | 'flat' | 'unstable' | 'escalated' | 'ok' | 'plain' =
-    running ? 'running'
-    : isError ? 'error'
-    : signal === 'degraded' ? 'degraded'
-    : signal === 'flat' ? 'flat'
-    : signal === 'unstable' ? 'unstable'
-    : escalated ? 'escalated'
-    : data ? 'ok'
-    : 'plain'
-
-  const STATE_NOTES: Record<string, string> = {
-    error: '这次调用失败了——可能是网络、后端余额或配置问题。点开卡片看错误详情，或展开会话轨迹排查。',
-    degraded: '⚠️ 本次所有候选都得 0.5 分——这是评分批量失败的特征（常见原因：模型不支持 logprob 打分）。分数不可用于排名，请更换模型重试或人工复核。',
-    flat: '几个方案得分几乎一样，排名没有参考意义——建议用「对比评审」对前两名单独复核，或细化评审标准。',
-    unstable: '多次独立评审的赢家不一致，说明模型也拿不准——建议人工复核后再决定，不要自动采信本次结果。',
-    escalated: `两个方案得分接近，单次评分可能有偶然性——已自动独立评审 ${String(data?.k_used ?? '?')} 次并取平均（每次交换先后顺序），结果更可靠。`,
-  }
-  // F1 透传：带 anomaly/warning 的"正常/升级"结果也必须有可见警告——
-  // 否则越界分被静默裁剪后，用户看到的是绿色"正常"，防线形同虚设。
-  const hasAnomaly = data?.anomaly === 'reward_out_of_range' || data?.anomaly === 'score_out_of_range'
-    || (typeof data?.warning === 'string' && data.warning.includes('裁剪'))
-  // 评分路径透明（②）：literal-mc = 采样近似分（K 次采样均值），精度弱于
-  // logprobs 精确分布——必须在面板上明示，避免用户把近似分当精确分。
-  const scoreMode = typeof data?.score_mode === 'string' ? data.score_mode : null
-  const mcNote = scoreMode === 'literal-mc'
-    ? `🎲 采样近似分：模型不返回 logprobs，本分是 ${String(data?.k_used ?? data?.n_evaluations ?? '多次')} 次评分标签采样平均——方向可信，精细分差请用 logprobs 模型复核。`
-    : null
-  // VAL 验证自主等级（P1-②，借鉴 math_agent 的 L0-L5 框架，取前三级）：
-  //   L0 = LLM 判断（评分就是模型的判断，无外部锚定）
-  //   L1 = 确定性规则介入（clamp 裁剪 / anomaly 护栏 / exact-flat 检测等机器规则）
-  //   L2 = 客观真值锚定（/bestofn 冒烟等机器验证的客观证据——面板层无此上下文，由报告层标注）
-  // 让用户一眼分辨「这分是 LLM 说的，还是机器规则保底的」。
-  const valLevel = hasAnomaly ? 'L1' : 'L0'
-  const valNote = `验证锚定: ${valLevel}（${valLevel === 'L1' ? '确定性规则介入——机器规则已生效' : 'LLM 判断——无外部锚定，仅供参考'}）`
-  const noticeText = STATE_NOTES[stateKey]
-    ?? (hasAnomaly
-      ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
-      : null)
-  // 宿主的原始细节（更技术性）作为补充行；避免与统一模板重复。
-  const hostDetail = typeof data?.warning === 'string'
-      ? data.warning
-      : typeof data?.message === 'string'
-        ? data.message
-        : null
-  const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable'
+  const badge = { text: badgeText, colorToken: (stateKey === 'error' || stateKey === 'degraded') ? 'var(--dsw-alias-state-error-primary)' : isWarn ? 'var(--dsw-alias-state-warn-label)' : stateKey === 'escalated' ? 'var(--dsw-alias-brand-primary)' : data ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)' }
 
   // 候选字母标：A/B/C/D…（超过 8 个回退数字）。
   const letterAt = (i: number): string => 'ABCDEFGH'[i] ?? String(i + 1)
-  const actionLabel = ACTION_LABELS[action] ?? action
+  const actionLabel = action
 
   return (
     <div
@@ -209,7 +155,7 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
       )}
 
       {!running && noticeText && (
-        <div style={isWarnStyle ? styles.warning : styles.note}>
+        <div style={isWarn ? styles.warning : styles.note}>
           {stateKey === 'escalated' ? '💡 ' : ''}{noticeText}
           {hostDetail && hostDetail !== noticeText && (
             <div style={styles.noticeDetail}>{hostDetail}</div>

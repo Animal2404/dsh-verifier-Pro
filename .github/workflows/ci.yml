@@ -30,8 +30,8 @@ jobs:
           # npm install 必须 --legacy-peer-deps：本仓库 peer 世界有冲突
           # （dsh-brand/dsh-invariants 等），不带会 ERESOLVE 卡死 10 分钟。
           npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
-          npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts \
-            --outDir lib --module nodenext --moduleResolution nodenext \
+          npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts src/client/panelLogic.ts \
+            --outDir lib --rootDir src --module nodenext --moduleResolution nodenext \
             --target es2022 --skipLibCheck --esModuleInterop
 
       - name: Pure-logic TS tests
@@ -39,6 +39,7 @@ jobs:
           node --test tests/credentials.test.mjs
           node --test tests/concurrency.test.mjs
           node --test tests/build_evidence.test.mjs
+          node --test tests/panel-logic.test.mjs
 
   # 慢 job：bridge_fix 桥套件（需 pip 装 llm-verifier）
   bridge:
