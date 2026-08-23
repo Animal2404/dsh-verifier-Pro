@@ -61,27 +61,44 @@ ws.onmessage = (ev) => {
 await send('Page.enable')
 await send('Runtime.enable')
 await send('Log.enable')
-await new Promise((r) => setTimeout(r, WAIT_MS))
+// Chrome 120+: PUT /json/new?url often ignores the url — navigate explicitly.
+await send('Page.navigate', { url: APP })
+await new Promise((r) => setTimeout(r, 4000))
 
 // Navigate into the session whose sidebar title matches SESSION_MATCH.
-// Target the LEAF text node (exact-ish prefix match) then click its nearest
-// clickable ancestor — clicking a broad container does nothing.
+// Harden (#12): try exact → prefix → scroll-and-retry (virtualized sidebar
+// rows only mount when scrolled into view); clicking a broad container does
+// nothing, so we target the LEAF text node's nearest clickable ancestor.
 const SESSION_MATCH = process.argv[4] ?? 'AI 编程助手'
-const click = await send('Runtime.evaluate', {
-  expression: `(() => {
+async function clickSession() {
+  const expr = (mode) => `(() => {
+    const m = ${JSON.stringify(SESSION_MATCH)};
     const leaves = [...document.querySelectorAll('*')].filter(el =>
-      el.childElementCount === 0 &&
-      (el.textContent || '').trim().startsWith(${JSON.stringify(SESSION_MATCH)}));
+      el.childElementCount === 0 && (el.textContent || '').trim().length > 0 &&
+      (${mode}));
     if (!leaves.length) return null;
     const leaf = leaves[leaves.length - 1];
-    const hit = leaf.closest('button, a, [role="button"], li') || leaf.parentElement || leaf;
-    hit.click();
-    leaf.click();
+    const hit = leaf.closest('button, a, [role="button"], li, [class*="item"]') || leaf.parentElement || leaf;
+    hit.click(); leaf.click();
     return (hit.textContent || '').trim().slice(0, 50);
-  })()`,
-  returnByValue: true,
-})
-console.log('clicked session:', click.result.value)
+  })()`
+  const exact = `(el.textContent).trim() === m`
+  const prefix = `(el.textContent).trim().startsWith(m)`
+  for (const mode of [exact, prefix]) {
+    const r = await send('Runtime.evaluate', { expression: expr(mode), returnByValue: true })
+    if (r.result && r.result.value) return r.result.value
+  }
+  // virtualized list: scroll the sidebar through its range and retry prefix
+  for (let i = 0; i < 5; i++) {
+    await send('Runtime.evaluate', { expression: 'window.scrollBy(0, 600); [...document.querySelectorAll("[class*=scroll],[class*=list]")].forEach(e => e.scrollTop = e.scrollTop + 400)' })
+    await new Promise((r) => setTimeout(r, 700))
+    const r = await send('Runtime.evaluate', { expression: expr(prefix), returnByValue: true })
+    if (r.result && r.result.value) return r.result.value
+  }
+  return null
+}
+const clicked = await clickSession()
+console.log('clicked session:', clicked)
 await new Promise((r) => setTimeout(r, 8000))
 
 // Step-scroll the transcript so virtualized rows mount.

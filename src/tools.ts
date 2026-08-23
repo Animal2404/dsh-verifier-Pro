@@ -980,7 +980,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
     const dispose = ctx.tools.register(defineTool({
       name: 'verifier',
       description:
-        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory per step), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
+        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory; returns checkpoint scores — count may be fewer than steps, official prefix-scoring semantics), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads — select can take ~40s, compare ~11s, so async avoids blocking), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
       parameters: {
         action: {
           type: 'string',
@@ -1134,7 +1134,12 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               steps: decSteps.map((s) => sanitizeForVerifier(s)),
               ...(model ? { model } : {}),
             }, undefined, signal)
-            const result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
+            let result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
+            // #14: decompose 偶发空响应/JSON 截断（模型隐藏推理吃光预算）——
+            // 桥侧有重试，TS 侧补一次，避免用户手动重试。
+            if (result && typeof result.error === 'string') {
+              result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
+            }
             return asToolResult(result)
           }
           case 'evaluate_session': {

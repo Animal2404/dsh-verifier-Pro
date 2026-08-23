@@ -41,6 +41,25 @@ jobs:
           node --test tests/build_evidence.test.mjs
           node --test tests/panel-logic.test.mjs
 
+      - name: Test-import guard (CI-compiled modules only)
+        # #13: 防止「本地 tsc 全量编译能过、CI 缺模块挂」的不一致——
+        # 所有测试 import 的 ../lib/ 模块必须落在 CI 独立编译清单内。
+        run: |
+          python - <<'EOF'
+          import re, pathlib, sys
+          compiled = {'credentials.js','concurrency.js','persist.js','types.js','client/panelLogic.js'}
+          bad = []
+          for t in pathlib.Path('tests').glob('*.test.mjs'):
+              for line in t.read_text(encoding='utf-8').splitlines():
+                  m = re.match(r"\s*import .* from '\.\./lib/([^']+)'", line)
+                  if m and m.group(1) not in compiled:
+                      bad.append(f"{t.name}: ../lib/{m.group(1)}")
+          if bad:
+              print('测试引用了 CI 未编译的模块（本地 tsc 全量编译会掩盖此问题）:', *bad, sep='\n  ')
+              sys.exit(1)
+          print('guard OK: all test lib imports are CI-compiled')
+          EOF
+
   # 慢 job：bridge_fix 桥套件（需 pip 装 llm-verifier）
   bridge:
     runs-on: ubuntu-latest
