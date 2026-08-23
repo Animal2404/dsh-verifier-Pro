@@ -623,11 +623,14 @@ export function createEscalationRunner(deps: EscalationDeps) {
     // without token-level logprobs used to burn the full 32K budget here.
     const modelParam = typeof params.model === 'string' ? params.model : undefined
     if (modelParam) {
-      const probe = await (await deps.getBridge()).request<{ ok: boolean; logprobs_supported: boolean; logprobs_error?: string | null }>(
+      const probe = await (await deps.getBridge()).request<{ ok: boolean; logprobs_supported: boolean; score_mode?: string | null; logprobs_error?: string | null }>(
         'probe_model', { model: modelParam }, 30_000,
       )
-      if (!probe.ok || probe.logprobs_supported !== true) {
-        throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型或去掉 model 参数。`)
+      // E2-fix (Round E): literal-mc (no-logprobs text-tag) models are also
+      // scoreable — admit them alongside true-logprobs models.
+      const scoreMode = probe.score_mode
+      if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
+        throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型、literal-mc 模型，或去掉 model 参数。`)
       }
     }
     if (method === 'compare') {
@@ -973,11 +976,14 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         // probe_model answers in ~1-2 tokens — fail fast with a clear error
         // instead of paying for 32K of wasted reasoning.
         if (model && args.model && model !== defaultModel) {
-          const probe = await bridge.request<{ ok: boolean; logprobs_supported: boolean; logprobs_error?: string | null }>(
+          const probe = await bridge.request<{ ok: boolean; logprobs_supported: boolean; score_mode?: string | null; logprobs_error?: string | null }>(
             'probe_model', { model: args.model }, 30_000, signal,
           )
-          if (!probe.ok || probe.logprobs_supported !== true) {
-            return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型），或去掉 model 参数。` }
+          // E2-fix (Round E): literal-mc (no-logprobs text-tag) models are
+          // also scoreable — admit them alongside true-logprobs models.
+          const scoreMode = probe.score_mode
+          if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
+            return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型）、literal-mc 模型，或去掉 model 参数。` }
           }
         }
         switch (args.action) {

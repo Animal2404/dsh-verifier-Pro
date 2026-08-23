@@ -44,6 +44,14 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TextIO
 
+# E2-fix (Round E): logprobs-free scoring router for models that never return
+# token-level logprobs. Imported at module level so handlers can call
+# bridge_fix.effective_n_evaluations / probe_model_v2 directly.
+try:
+    import bridge_fix  # type: ignore
+except Exception:
+    bridge_fix = None  # type: ignore[assignment]
+
 try:
     import llm_verifier
 except Exception as exc:  # pragma: no cover - exercised only when dep missing
@@ -202,6 +210,18 @@ def _require_library() -> None:
         # Patching is best-effort; without it some models 400 on top_logprobs.
         pass
 
+    # E2-fix (Round E): logprobs-free scoring router. For the 5 models that
+    # never return token-level logprobs (mimo-v2.5-pro / minimax-m3 /
+    # minimax-m2.7 / muse-spark-1.2-contributor / deepseek-v4-flash), intercept
+    # call_verifier and route to a no-logprobs call + literal score-tag parsing
+    # + n_evaluations majority-voting (Monte-Carlo). Must install AFTER the
+    # top_logprobs cap wrapper above (it reuses that wrapper internally).
+    try:
+        import bridge_fix  # type: ignore
+        bridge_fix.install()
+    except Exception:
+        pass
+
 
 _CLIENT = None
 _CLIENT_GUARD = threading.Lock()
@@ -280,7 +300,13 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
     criteria = kwargs.pop("criteria", None)
     kwargs["criteria"] = criteria if criteria is not None else DEFAULT_CRITERIA
     # Keep evaluation cost bounded by default; explicit caller params win.
-    kwargs.setdefault("n_evaluations", 1)
+    # E2-fix (Round E): literal-mc (no-logprobs) models default to K=5 samples
+    # (single draw is a 1/20 quantized estimate — too noisy).
+    _model = kwargs.get("model")
+    if _model and bridge_fix is not None:
+        kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
+    else:
+        kwargs.setdefault("n_evaluations", 1)
     kwargs.setdefault("pivots", 2)
     _sanitize_images(kwargs, "select")
     kwargs["client"] = _get_client()
@@ -311,7 +337,12 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("compare requires `candidate_b` string")
     criteria = kwargs.pop("criteria", None)
     kwargs["criteria"] = criteria if criteria is not None else DEFAULT_CRITERIA
-    kwargs.setdefault("n_evaluations", 1)
+    # E2-fix (Round E): literal-mc models default to K=5 (see _handle_select).
+    _model = kwargs.get("model")
+    if _model and bridge_fix is not None:
+        kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
+    else:
+        kwargs.setdefault("n_evaluations", 1)
     _sanitize_images(kwargs, "compare")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
@@ -331,7 +362,12 @@ def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("track requires a non-empty `problem` string")
     if not isinstance(steps, list) or not steps:
         raise ValueError("track requires a non-empty `steps` array")
-    kwargs.setdefault("n_evaluations", 1)
+    # E2-fix (Round E): literal-mc models default to K=5 (see _handle_select).
+    _model = kwargs.get("model")
+    if _model and bridge_fix is not None:
+        kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
+    else:
+        kwargs.setdefault("n_evaluations", 1)
     _sanitize_images(kwargs, "track")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
@@ -349,7 +385,12 @@ def _handle_progress_start(params: dict[str, Any]) -> dict[str, Any]:
     problem = kwargs.pop("problem", None)
     if not isinstance(problem, str) or not problem.strip():
         raise ValueError("progress_start requires a non-empty `problem` string")
-    kwargs.setdefault("n_evaluations", 1)
+    # E2-fix (Round E): literal-mc models default to K=5 (see _handle_select).
+    _model = kwargs.get("model")
+    if _model and bridge_fix is not None:
+        kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
+    else:
+        kwargs.setdefault("n_evaluations", 1)
     _sanitize_images(kwargs, "progress_start")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
@@ -482,33 +523,16 @@ def _handle_probe_model(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "probe_model requires `model`"}
     try:
         client = _get_client()
-        from llm_verifier import fine_grained_reward as fgr
-        resolved = fgr.resolve_model(client, model)
-        response = client.chat.completions.create(
-            model=resolved,
-            messages=[{"role": "user", "content": "t"}],
-            max_tokens=1,
-            temperature=1.0,
-            logprobs=True,
-            top_logprobs=2,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        choice = response.choices[0]
-        ok = bool(choice.logprobs and choice.logprobs.content)
-        return {
-            "ok": ok,
-            "model": resolved,
-            "logprobs_supported": ok,
-            "logprobs_error": None if ok else (
-                f"model {model!r} returned no token-level logprobs "
-                f"(finish_reason={choice.finish_reason!r}) — verifier cannot score with it"
-            ),
-        }
+        # E2-fix (Round E): v2 probe — classifies models into score modes
+        # ('logprobs' | 'text-tags' | 'unsupported') via the profile table.
+        import bridge_fix  # type: ignore
+        return bridge_fix.probe_model_v2(client, model)
     except Exception as e:
         return {
             "ok": False,
             "model": model,
             "logprobs_supported": False,
+            "score_mode": None,
             "logprobs_error": f"probe_model failed: {str(e)}",
         }
 
