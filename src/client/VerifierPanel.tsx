@@ -1,7 +1,7 @@
 import React from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ToolCallOwnerProps } from '@deepseek-ai/dsh-client-ui-tool/client'
-import { extractPanel, derivePanelState } from './panelLogic.js'
+import { extractPanel, derivePanelState, ACTION_LABELS } from './panelLogic.js'
 
 /**
  * Verifier result card — keyed `tool.call.toolview` view for the wire tool
@@ -73,23 +73,6 @@ function extract(toolName: string, blockRaw: unknown): Extracted {
   return { action, data: null, isError, running }
 }
 
-/**
- * 中文界面文案：动作名与状态徽章均以中文为主，英文原词保留为小字注释，
- * 方便与 README/工具参数对照。映射缺失时回退英文原词。
- */
-const ACTION_LABELS: Record<string, string> = {
-  select: '择优评选',
-  compare: '对比评审',
-  track: '轨迹打分',
-  progress_start: '进度追踪 · 开始',
-  progress_update: '进度追踪 · 更新',
-  progress_close: '进度追踪 · 结束',
-  task_start: '异步任务 · 启动',
-  task_status: '异步任务 · 查询',
-  usage: '用量统计',
-  ping: '连通探测',
-}
-
 const BADGE_LABELS: Record<string, string> = {
   ok: '正常',
   degraded: '信号不可信',
@@ -118,7 +101,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
   // 候选字母标：A/B/C/D…（超过 8 个回退数字）。
   const letterAt = (i: number): string => 'ABCDEFGH'[i] ?? String(i + 1)
-  const actionLabel = action
+  // 中文标题（用户要求：卡片标题说明这个动作是干什么的）——映射缺失回退英文原词。
+  const actionLabel = ACTION_LABELS[action] ?? action
 
   return (
     <div

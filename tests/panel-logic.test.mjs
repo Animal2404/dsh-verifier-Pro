@@ -6,7 +6,7 @@
 // CI/本地先把它独立编译到 lib/client/panelLogic.js（harness-free）再测试。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractPanel, derivePanelState } from '../lib/client/panelLogic.js'
+import { extractPanel, derivePanelState, ACTION_LABELS } from '../lib/client/panelLogic.js'
 
 const extract = extractPanel
 const derive = derivePanelState
@@ -158,4 +158,23 @@ test('progress/task/usage 卡片显示内容摘要（不再空白）', () => {
   assert.match(u.summaryLine ?? '', /62 次调用/, 'usage 显示调用次数')
   assert.match(u.summaryLine ?? '', /27\.8K in/, 'usage 显示输入 token')
   assert.match(u.summaryLine ?? '', /56%/, 'usage 显示缓存命中率')
+})
+
+// 卡片标题必须是中文（用户反馈：全部卡片都要让用户知道是干什么的）。
+test('ACTION_LABELS 覆盖全部 action（卡片中文标题）', () => {
+  const expected = {
+    select: '择优评选', compare: '对比评审', track: '轨迹打分',
+    decompose: '分解验证', evaluate_session: '会话评估',
+    progress_start: '进度追踪 · 开始', progress_update: '进度追踪 · 更新',
+    progress_close: '进度追踪 · 结束', task_start: '异步任务 · 启动',
+    task_status: '异步任务 · 查询', usage: '用量统计',
+  }
+  for (const [action, label] of Object.entries(expected)) {
+    assert.equal(ACTION_LABELS[action], label, `${action} 的中文标题`)
+  }
+  // 标题用于渲染：`🔍 {label} · {action}`
+  const titleOf = (a) => `🔍 ${ACTION_LABELS[a] ?? a} · ${a}`
+  assert.equal(titleOf('progress_update'), '🔍 进度追踪 · 更新 · progress_update')
+  assert.equal(titleOf('task_status'), '🔍 异步任务 · 查询 · task_status')
+  assert.equal(titleOf('usage'), '🔍 用量统计 · usage')
 })

@@ -76,7 +76,7 @@ export interface PanelState {
   data: Record<string, unknown> | null
 }
 
-const ACTION_LABELS: Record<string, string> = {
+export const ACTION_LABELS: Record<string, string> = {
   select: '择优评选', compare: '对比评审', track: '轨迹打分',
   decompose: '分解验证', evaluate_session: '会话评估',
   progress_start: '进度追踪 · 开始', progress_update: '进度追踪 · 更新',
