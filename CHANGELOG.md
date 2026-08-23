@@ -2,6 +2,36 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased] — v0.5.0 之后（将并入 0.6.0）
+
+### Added
+- **P1-② VAL 验证锚定**：面板与 /bestofn 报告标注验证自主等级（L0 LLM 判断 / L1 规则介入 / L2 客观证据）
+- **P1-① 声明-证据对照**：/bestofn 评分前把候选自述与冒烟证据机械核对，矛盾候选降信并显式警告
+- **rubric 分解验证（decompose）**：轨迹摊开 → 失败分类（DeepVerifier 14 类）→ 核查问题；诚实适配（生成不实查）
+- **evaluate_session**：轨迹评分结构化导出（checkpoint 表 + 趋势 + JSONL 就绪串）
+- **响应文本检测**：INCOMPLETE/REPETITIVE/REFUSAL（CompassVerifier C 类）→ anomaly 警告
+- **majority 短路**（后因概念误用移除——见 Removed）
+- **面板逻辑抽离为可测模块**（panelLogic.ts）+ 9 用例 GUI 回归
+- **文档五件套**：配置详解/真实性能基准/错误排查 FAQ/端到端示例/命名说明
+
+### Changed
+- **reason-first 评分**：评分提示词追加分步推理指令（启发自 CompassVerifier CV_COT，非 GenPRM 机制移植）
+- **异常分数形态检测**：NaN/全 0.5/全挤极端 → anomaly（自研护栏，扩展 exact-flat）
+- **CI 从空心升级为真测试**：~84 项（bridge 51 + 纯逻辑 30 + build_evidence 3），拆 core/bridge 双 job
+- **测试导入守卫**：CI 测试的 lib/ import 必须落在独立编译清单内
+- **CDP 冒烟加固**：会话点击三级容错（精确→前缀→虚拟滚动）
+- **decompose/evaluate_session TS 层重试**（偶发空响应）
+- **stable/0.5.x 稳定分支**建立；actions 升级 v7（清 Node 20 弃用警告）
+
+### Removed
+- **majority 短路**：误标借鉴 uson1x（其 majorityVoting 是采样级一致，我实现成候选文本级多数——概念错配 + 多数≠正确的正确性风险）。锦标赛永远裁决
+
+### Fixed
+- evaluate_session 导出表错位（官方 track 返回 checkpoint 分数 ≤ 步骤数，诚实标注）
+- majority 短路曾伪造 outlier 质量分（0.000 = 假陈述）——移除
+- VAL degraded 误标 L0（exact-flat 规则触发应为 L1）
+- persist 轮转对齐 agent-teams 完整原子写（错误码白名单 + 退避 + 直接写回退）
+
 ## [0.5.0] - 2026-08-23
 
 Best-of-N 三方审计（Round A/B）全部 P1 修复 + P2 批量清零 + Round C 复审计修复。

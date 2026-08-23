@@ -75,6 +75,7 @@ export interface PanelState {
 
 const ACTION_LABELS: Record<string, string> = {
   select: '择优评选', compare: '对比评审', track: '轨迹打分',
+  decompose: '分解验证', evaluate_session: '会话评估',
   progress_start: '进度追踪 · 开始', progress_update: '进度追踪 · 更新',
   progress_close: '进度追踪 · 结束', task_start: '异步任务 · 启动',
   task_status: '异步任务 · 查询', usage: '用量统计', ping: '连通探测',

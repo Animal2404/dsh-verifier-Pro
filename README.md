@@ -17,7 +17,7 @@
 
 ```
 DSH Agent
-  ↓ verifier 工具（单一工具 × 9 action：select/compare/track/progress_*/task_*/usage）
+  ↓ verifier 工具（单一工具 × 11 action：select/compare/track/decompose/evaluate_session/progress_*/task_*/usage）
 dsh-verifier-Pro (Node/TS host plugin)
   ↓ JSON Lines over stdio (id-correlated, concurrent)
 bridge/verifier_brain_bridge.py (ThreadPool × N)
@@ -34,7 +34,7 @@ llm-verifier 0.2.0 (official PyPI package)
 | 进度跟踪 | `verifier` action=`progress_*` | 每步实时打分；持续 <0.05 = 方向可能错了 |
 | 质量门禁 / RL | `verifier` action=`compare` / `track` / 分数落盘 | 成对评审、整轨迹复盘、reward 数据导出 |
 
-一个工具，九个 action：`select` / `compare` / `track` / `progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status` / `usage`。对 agent 说 "verifier compare 一下" 即可。
+一个工具，十一个 action：`select` / `compare` / `track` / `decompose` / `evaluate_session` / `progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status` / `usage`。对 agent 说 "verifier compare 一下" 即可。
 
 ## 安装
 
