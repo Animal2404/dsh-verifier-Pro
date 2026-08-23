@@ -212,9 +212,10 @@ function clamp01(value: unknown): { value: number; clamped: boolean } {
 }
 
 /**
- * P2-③ 异常响应形态检测（借鉴 CompassVerifier 的异常/无效响应识别，扩展
- * exact-flat 单一护栏）。基于 clamp 后的分数数组做机械检测（诚实范围——
- * 只从分数结构推断，不读模型内部）：
+ * 异常分数形态检测（自研护栏——受 CompassVerifier「C=INVALID 响应」理念启发，
+ * 但实现维度不同：它检测响应文本（截断/重复/拒绝），这里检测分数数字形态，
+ * 是对 exact-flat 单一护栏的扩展。注意：文本级检测见桥侧 response-shape 检查）。
+ * 基于 clamp 后的分数数组做机械检测（诚实范围——只从分数结构推断）：
  *   1. 存在 NaN/非有限 → 评分器输出异常（clamp01 已把 null 洗成 NaN）
  *   2. 全 0.5 → 批量失败被 tie 掩蔽（已有 degraded 护栏，这里统一返回形态名）
  *   3. 全挤极端（全部 ≥0.95 或全部 ≤0.05）且候选数 ≥2 → 「无区分」疑似
@@ -883,7 +884,7 @@ export interface ToolsOptions {
 }
 
 interface VerifierToolArgs {
-  action: 'select' | 'compare' | 'track' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
+  action: 'select' | 'compare' | 'track' | 'decompose' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
   problem?: string
   candidates?: string[]
   candidate_a?: string
@@ -982,7 +983,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       parameters: {
         action: {
           type: 'string',
-          enum: ['select', 'compare', 'track', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
+          enum: ['select', 'compare', 'track', 'decompose', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
           required: true,
           description: 'What to do.',
         },
@@ -1117,6 +1118,22 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               result.scores = clampedScores.map((c) => c.value)
             }
             store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: args.problem, model, scores: result.scores, duration_ms: Date.now() - started })
+            return asToolResult(result)
+          }
+          case 'decompose': {
+            // rubric 分解验证（DeepVerifier 移植，诚实适配）：把轨迹摊开成
+            // 步骤摘要 + 可疑行为映射失败分类 + 核查问题清单。核查问题的
+            // 【执行】留给调用方（我们没有 rollout 实查能力）。
+            if (!args.problem) throw new Error('verifier decompose requires `problem`')
+            if (!args.steps?.length) throw new Error('verifier decompose requires `steps`')
+            const decProblem = args.problem as string
+            const decSteps = args.steps as string[]
+            const decExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('decompose', {
+              problem: sanitizeForVerifier(decProblem),
+              steps: decSteps.map((s) => sanitizeForVerifier(s)),
+              ...(model ? { model } : {}),
+            }, undefined, signal)
+            const result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
             return asToolResult(result)
           }
           case 'progress_start': {

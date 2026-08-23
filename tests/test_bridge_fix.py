@@ -236,12 +236,33 @@ def live_test():
     print(f"  usage: {json.dumps(usage)}")
 
 
+def test_response_shape():
+    print("[CompassVerifier C-class response-shape detection]")
+    # REFUSAL — short explicit refusal
+    r = bridge_fix.detect_response_shape("I cannot answer this question.", "stop")
+    check("refusal detected", r == "refusal", str(r))
+    # INCOMPLETE — truncated (finish_reason=length, no score tag)
+    r = bridge_fix.detect_response_shape("the answer is 4", "length")
+    check("incomplete detected on length+no tag", r == "incomplete", str(r))
+    # INCOMPLETE must NOT fire when score tag present (length is ok)
+    r = bridge_fix.detect_response_shape("the answer is 4 <score_A> B </score_A>", "length")
+    check("length with score tag NOT incomplete", r is None, str(r))
+    # REPETITIVE — 8-gram loop
+    loop = " ".join(["answer answer answer yes yes yes"] * 6)
+    r = bridge_fix.detect_response_shape(loop, "stop")
+    check("repetitive detected", r == "repetitive", str(r))
+    # NORMAL — plain scored answer
+    r = bridge_fix.detect_response_shape("Candidate A is correct because <score_A> A </score_A>", "stop")
+    check("normal response no flag", r is None, str(r))
+
+
 def main():
     print("=== bridge_fix offline tests ===")
     test_profiles()
     test_extraction()
     test_router_dispatch()
     test_reason_first()
+    test_response_shape()
     print(f"\noffline: {PASS} passed, {FAIL} failed")
     if "--live" in sys.argv:
         live_test()

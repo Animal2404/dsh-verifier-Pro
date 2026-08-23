@@ -1,6 +1,7 @@
-// P2-② 对抗探针：验证「评分器不被注入带偏」的三层防线（诚实范围——我们
-// 控制的是传输层 sanitize + clamp/anomaly + exact-flat 护栏，不是模型本身的
-// 提示词免疫力）。借鉴 Quality Oracle 的对抗探针思路（提示注入/越界/幻觉）。
+// 评分器自测探针（自研——受 Quality Oracle 的「对抗探针」命名启发，但对象不同：
+// 它审计被测代理/MCP 服务器的安全（20+ OWASP 探针），我们自测评分器的防线是否
+// 可靠（sanitize 中性化 / clamp+anomaly / degraded 护栏）。诚实标注：这是评分器
+// 自测，不是对 Quality Oracle 机制的移植。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createEscalationRunner } from '../lib/tools.js'

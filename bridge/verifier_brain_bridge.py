@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import threading
 import traceback
@@ -326,6 +327,11 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
         mode = bridge_fix.score_mode_for(str(kwargs["model"]))
         if mode in ("logprobs", "literal-mc"):
             out["score_mode"] = mode
+        # CompassVerifier C-class response-shape detection (②).
+        shape = bridge_fix.consume_response_shape()
+        if shape:
+            out["anomaly"] = f"response_shape_{shape}"
+            out["warning"] = f"⚠️ 评分模型输出形态异常（{shape}）：{'截断' if shape == 'incomplete' else '循环重复' if shape == 'repetitive' else '拒绝回答'}——分数不可信，请人工复核。"
     return _jsonable(out)
 
 
@@ -363,6 +369,13 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         mode = bridge_fix.score_mode_for(str(kwargs["model"]))
         if mode in ("logprobs", "literal-mc"):
             out["score_mode"] = mode
+        # CompassVerifier C-class response-shape detection (②): a truncated /
+        # loop-repeating / refusal model output must surface as an anomaly —
+        # score numbers alone cannot see it.
+        shape = bridge_fix.consume_response_shape()
+        if shape:
+            out["anomaly"] = f"response_shape_{shape}"
+            out["warning"] = f"⚠️ 评分模型输出形态异常（{shape}）：{'截断' if shape == 'incomplete' else '循环重复' if shape == 'repetitive' else '拒绝回答'}——分数不可信，请人工复核。"
     return _jsonable(out)
 
 
@@ -389,6 +402,116 @@ def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
     })
     result = llm_verifier.track(problem=problem, steps=steps, **kwargs)
     return _jsonable({"scores": getattr(result, "scores", None)})
+
+
+# DeepVerifier 分解验证移植（rubric ③）——诚实适配说明：
+# DeepVerifier 的 CONTEXT_PROMPT 三阶段是「轨迹摘要 → 失败分类 → 核查问题」，
+# 然后派独立 agent 实查（rollout）。我们移植前两阶段 + 核查问题【生成】，
+# 不做独立实查（我们没有 rollout 能力）；生成的核查问题供用户/团队人工核查。
+# 失败分类学直接采用 DeepVerifier 的 14 类（见 template.py POTENTIAL ERRORS）。
+
+_DEEPVERIFIER_ERRORS = (
+    "1. Failure to consult the right sources, selecting/observing the wrong item\n"
+    "2. Premature conclusion and incomplete exploration\n"
+    "3. Misinterpreting or misunderstanding the instructions or questions\n"
+    "4. Reliance on generic searches, secondary sources, not consulting primary sources\n"
+    "5. UI interaction failure or tool failure\n"
+    "6. Source/information not available or not accessible, or login wall\n"
+    "7. Goal drift to partial/less relevant task, misfocusing on secondary details\n"
+    "8. Hallucinated/overconfident claims, conflated concepts, inferential leaps\n"
+    "9. Max step reached\n"
+    "10. Ignored/missed key words or key information that is available in the instructions or sources\n"
+    "11. Text format error\n"
+    "12. Anchored on less relevant information\n"
+    "13. Ambiguity-driven guesses\n"
+    "14. Did not use proper modality (image or text or video or audio)"
+)
+
+_DECOMPOSE_PROMPT = """You are verifying an agent's trajectory on a task. Perform three tasks **in order**. Return **only** the JSON object below, no extra text.
+
+Inputs: task, steps (each step is one agent action).
+
+### 1) STEP SUMMARY
+For each step, state what the agent did and (if it consulted a source) what key info it obtained.
+
+### 2) POTENTIAL ERRORS
+Identify suspicious behaviors in the steps and map each to **one** error from this list:
+{errors}
+
+### 3) CHECK QUESTIONS
+Propose the **fewest** (<=3) concrete yes-no verification questions that would confirm or refute the agent's key claims, each tied to a specific source/check the question would require.
+
+Return JSON exactly like:
+{{
+  "step_summary": [{{"step": 1, "action": "...", "source": "..." or null, "info": "..." or null}}],
+  "potential_errors": [{{"behavior": "...", "error": "<one from list>"}}],
+  "check_questions": [{{"question": "...", "requires": "..."}}]
+}}
+
+Task: {task}
+Steps:
+{steps}
+"""
+
+
+def _handle_decompose(params: dict[str, Any]) -> dict[str, Any]:
+    """DeepVerifier-style rubric decomposition of a trajectory (③).
+
+    Returns { step_summary, potential_errors, check_questions } — the
+    decomposition structure. Verification of the check questions is left to
+    the caller (we generate, not execute, per honest adaptation).
+    """
+    _require_library()
+    problem = str(params.get("problem") or "")
+    steps = params.get("steps")
+    model = str(params.get("model") or "") if params.get("model") else None
+    if not problem.strip():
+        raise ValueError("decompose requires a non-empty `problem` string")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("decompose requires a non-empty `steps` array")
+
+    client = _get_client()
+    from llm_verifier import fine_grained_reward as fgr
+    resolved = fgr.resolve_model(client, model) if model else getattr(client, "model", None) or fgr.DEFAULT_MODEL
+
+    steps_text = "\n".join(f"Step {i + 1}: {s}" for i, s in enumerate(steps))
+    prompt = _DECOMPOSE_PROMPT.format(errors=_DEEPVERIFIER_ERRORS, task=problem, steps=steps_text)
+
+    # No logprobs needed — decomposition is a structural analysis, not scoring.
+    body = dict(
+        model=resolved,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4096,
+        temperature=0.0,
+    )
+    response = client.chat.completions.create(**body)
+    text = response.choices[0].message.content or ""
+    finish = getattr(response.choices[0], "finish_reason", None)
+
+    # Parse the JSON object out of the reply (tolerate ```json fences / stray text).
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        return {"error": "decompose: 模型未返回结构化 JSON", "raw": text[:800], "finish_reason": finish}
+    raw_json = m.group(0)
+    try:
+        parsed = json.loads(raw_json)
+    except Exception as exc:
+        # Truncated JSON (finish_reason=length) — attempt partial repair:
+        # close the outermost object and retry once; else surface the fragment.
+        if finish == "length":
+            repaired = raw_json + "}" * 3
+            try:
+                parsed = json.loads(repaired)
+            except Exception:
+                return {"error": f"decompose: JSON 被截断且修复失败: {exc}", "raw": raw_json[:800], "finish_reason": finish}
+        else:
+            return {"error": f"decompose: JSON 解析失败: {exc}", "raw": raw_json[:800], "finish_reason": finish}
+    return _jsonable({
+        "step_summary": parsed.get("step_summary", []),
+        "potential_errors": parsed.get("potential_errors", []),
+        "check_questions": parsed.get("check_questions", []),
+        "finish_reason": finish,
+    })
 
 
 def _handle_progress_start(params: dict[str, Any]) -> dict[str, Any]:
@@ -555,6 +678,7 @@ _HANDLERS: dict[str, Any] = {
     "select": _handle_select,
     "compare": _handle_compare,
     "track": _handle_track,
+    "decompose": _handle_decompose,
     "progress_start": _handle_progress_start,
     "progress_update": _handle_progress_update,
     "progress_close": _handle_progress_close,

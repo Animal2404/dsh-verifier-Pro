@@ -177,6 +177,10 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
     literal-tag fallback (fine_grained_reward.py:670-689). Retries once when
     the reply is empty (muse-spark sometimes spends the whole budget on
     hidden reasoning). Records usage in the official USAGE counter.
+    Also records the response TEXT SHAPE (CompassVerifier C-class: incomplete/
+    repetitive/refusal) into a thread-local so the bridge handler can surface
+    it as an anomaly — the score numbers alone cannot see a truncated or
+    loop-repeating model output.
     """
     from llm_verifier import fine_grained_reward as fgr
 
@@ -184,7 +188,7 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
     budget = max_tokens or profile.get("max_tokens") or 4096
     thinking = profile.get("thinking", "disabled")
 
-    def _call() -> tuple[str, None, None]:
+    def _call() -> tuple[str, str | None, None]:
         body = dict(
             model=fgr.resolve_model(client, model),
             messages=[{"role": "user", "content": prompt}],
@@ -197,22 +201,75 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
         # and the sglang upstream 400s on explicit null.
         response = client.chat.completions.create(**body)
         fgr.USAGE.record(response)
-        text = response.choices[0].message.content or ""
-        return text, None, None
+        choice = response.choices[0]
+        text = choice.message.content or ""
+        finish = getattr(choice, "finish_reason", None)
+        return text, finish, None
 
-    text, _, _ = _call()
+    text, finish, _ = _call()
     if not text.strip():
         # Hidden reasoning consumed the budget (muse-spark); one retry.
-        text, _, _ = _call()
+        text, finish, _ = _call()
+    # CompassVerifier C-class response-shape detection (mechanical):
+    # incomplete (finish_reason=length) / repetitive (n-gram loop) / refusal.
+    _RESPONSE_SHAPE.value = detect_response_shape(text, finish)
     return text, None, None
+
+
+# ---------------------------------------------------------------------------
+# CompassVerifier C-class response-shape detection
+# ---------------------------------------------------------------------------
+
+_RESPONSE_SHAPE = threading.local()
+
+
+def detect_response_shape(text: str, finish_reason: str | None) -> str | None:
+    """Mechanical INCOMPLETE/REPETITIVE/REFUSAL detection on the model's raw
+    response text (CompassVerifier CV_PROMPT's C=INVALID class). Returns
+    'incomplete' | 'repetitive' | 'refusal' | None. 诚实范围：正则/统计启发，
+    非训练模型。"""
+    t = (text or "").strip()
+    if not t:
+        return None  # empty handled by retry; nothing to classify
+    # REFUSAL — explicit refusal phrasing
+    refusal = re.search(
+        r"\b(i cannot|i can't|i am unable|i'm unable|unable to (answer|provide|access)|"
+        r"refus(?:e|ed)|not allowed to|can't (answer|provide|access))\b",
+        t, re.IGNORECASE)
+    if refusal and len(t) < 200:
+        # short refusal-y reply — likely a refusal, not a scored answer
+        return "refusal"
+    # INCOMPLETE — cut off mid-generation (no score tag + length-truncated)
+    if finish_reason == "length" and "<score" not in t.lower():
+        return "incomplete"
+    # REPETITIVE — n-gram loop: a 8-gram repeating ≥3× (heuristic)
+    words = re.findall(r"\S+", t.lower())
+    if len(words) >= 30:
+        for n in (6, 8, 12):
+            seen = {}
+            for i in range(0, len(words) - n + 1):
+                gram = tuple(words[i:i + n])
+                seen[gram] = seen.get(gram, 0) + 1
+            if seen and max(seen.values()) >= 3:
+                return "repetitive"
+    return None
+
+
+def consume_response_shape() -> str | None:
+    """Bridge handler reads (and clears) the last response-shape flag."""
+    shape = getattr(_RESPONSE_SHAPE, "value", None)
+    _RESPONSE_SHAPE.value = None
+    return shape
 
 
 # ---------------------------------------------------------------------------
 # call_verifier router — drop-in replacement for llm_verifier.fine_grained_reward.call_verifier
 # ---------------------------------------------------------------------------
 
-# P2-③ 先推理再打分（借鉴 GenPRM：显式 CoT 推理提升判断准确率，而不是直接
-# 拍分数）。评分提示词前追加分步推理指令，让模型先论证再给 <score_X> 标签。
+# 先推理再打分（启发自 CompassVerifier 的 CV_COT_PROMPT：显式 "Analysis step
+# by step → Final Judgment" 结构；GenPRM 亦有 CoT 先行理念——但两者都是训练/
+# 提示能力，我们这里是提示词层面的显式化自研结构，不是对任一仓库的机制移植）。
+# 评分提示词前追加分步推理指令，让模型先论证再给 <score_X> 标签。
 # 环境变量 VERIFIER_BRAIN_REASON_FIRST=0 可关闭（默认开）。
 _REASON_FIRST = (
     "\n\nBefore scoring, reason step by step: "
