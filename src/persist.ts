@@ -4,10 +4,14 @@
  * restarts and plugin reloads — fixing the reference implementation's
  * "in-memory only" limitation.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { VerifierHistoryRecord, VerifierTaskRecord } from './types.js'
+
+/** JSONL rotation: rewrite only when crossed; keep the newest tail. */
+const ROTATE_THRESHOLD = 2000
+const ROTATE_KEEP = 1000
 
 export class VerifierStore {
   private readonly dir: string
@@ -74,8 +78,25 @@ export class VerifierStore {
   private appendLine(file: string, value: unknown): void {
     try {
       appendFileSync(file, JSON.stringify(value) + '\n', 'utf8')
+      this.rotateIfNeeded(file)
     } catch {
       // Persistence is best-effort; verification results still return.
+    }
+  }
+
+  /**
+   * Cap unbounded JSONL growth: past ROTATE_THRESHOLD lines, keep only the
+   * most recent ROTATE_KEEP lines. F11 follow-up: history.jsonl used to grow
+   * forever (estimateCallMs then paid a full-file read on every escalation).
+   */
+  private rotateIfNeeded(file: string): void {
+    try {
+      const lines = readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim())
+      if (lines.length <= ROTATE_THRESHOLD) return
+      const kept = lines.slice(-ROTATE_KEEP)
+      writeFileSync(file, kept.join('\n') + '\n', 'utf8')
+    } catch {
+      // Rotation is best-effort; a failed rewrite must not lose the append.
     }
   }
 

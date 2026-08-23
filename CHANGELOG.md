@@ -2,6 +2,46 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.0] - 2026-08-23
+
+Best-of-N 三方审计（Round A/B）全部 P1 修复 + P2 批量清零。
+
+### Fixed
+- **F1** 升级评分全链路 clamp01：升级轮越界分逐轮裁剪，anomaly/warning 透传到 composite 与面板（此前仅首评设防）
+- **F2** SECURITY.md 虚假声明纠正：sanitizeForVerifier 从未存在 → 真实实现传输层消毒器（10k 截断 + 控制符剥离 + 注入短语中性化）并接入 compare/select 入参
+- **F3** NaN/Infinity 不再打穿 stdio JSON-Lines 协议：`_jsonable` 洗非有限浮点 + `allow_nan=False` 兜底 + TS 侧坏帧按 id 关联立即 reject（此前请求假死到全额超时）
+- **F4** images 双洞：compare 缓存键补 images；select 补 images 透传 + 缓存键
+- **F5** AbortSignal 监听器泄漏：bridge.ts 统一 cleanup，所有 settle 路径（成功/超时/中止/写败/坏帧）摘除监听
+- **F6** 并发闸门收口：共享 Semaphore 贯通工具 / 异步任务 / bestofn / 服务缝四条路径
+- **U-B1** escalationModel 接回同步工具路径——分级评分对最常用路径生效
+- **U-N1** task_start 加固：method 白名单、params 必须为对象、select/compare 强制显式 criteria（堵桥层静默 DEFAULT_CRITERIA 替换）
+- **U-N2/U-N9** 服务缝 ctx.verifierBrain.* 改走升级 runner：缓存/clamp/闸门/history/defaultModel 注入与工具路径完全一致
+- 安装三连：README 包名大写 Pro→pro（装配失败根因）、示例模型 flash→v4-pro、Node 门槛三处统一 >=18
+- **凭据解析加固（U-B4/U-N11/U-N7）**：env-only OPENCODE_GO_API_KEY 无凭据文件也生效；嵌套 provider 节（deepseek: + api_key:）运行时与 setup.mjs 同表映射；行内注释引号感知剥离 + 引号值反转义
+- F7 probe 错误分类改 fail-closed（401/402/网络故障不再被误报为健康）
+- F8 setup --fix 原子写（tmp+rename）+ 缺行自动插入 + .bak 只留 3 份
+- F9 Windows 下超时不再漏标（布尔标志替代 signal 检测）
+- F10 同名候选冒烟产物哈希后缀防互相覆盖
+- F11 冷恢复垫片：重启后 running 任务标记 interrupted，任务 id 序号跨重启续接；内存任务表封顶 200
+- F12 select 临时缓存文件 finally 必清（%TEMP% 不再每次调用遗留孤儿文件）
+- F13 compare 首个升级 rep 失败降级保留 k1（与 select 行为一致）
+- F15 n_evaluations≤8 / pivots≤20 / max_workers≤16 硬上限（成本爆炸向量封口）
+- F16 bestofn --summary 带空格解析修复；团队规模 N 封顶 8
+- F17 check_client.mjs 真正接进 build.sh；过期注释修正
+- U-B2/B3 unstable 与预算跳过路径补 history 落盘（成本审计不再缺数）
+- U-N4 track checkpoint_steps 校验 + 过并发闸
+- U-N5 bestofn 激活指令 evidence_chain 改绝对路径（含系统提示词同步修正）
+- U-N14 smoke 记录缺失从"默认幸存"改"unknown 排除出排名"
+- U-B5/B6 验收/测试脚本废弃 flash 全部换 v4-pro；test_bestofn Python 路径跨平台
+- U-I7 peerDeps 补 @deepseek-ai/dsh-client-ui-tool
+- U-B17 双编码 mojibake 文件头修复
+- U-B15 README 不再宣称 maxCostPerVerification 已生效（v0.6.0 待办）
+
+### Added
+- CI：GitHub Actions（build + typecheck host/client + 离线单测）
+- 凭据解析离线单测 8 条（三种布局 + 别名优先级矩阵）；升级链路回归测试 5 条（clamp/anomaly/分级路由/降级）
+- history.jsonl 自动轮转（超 2000 行裁到最近 1000）
+
 ## [0.4.9] - 2026-08-23
 
 ### Changed

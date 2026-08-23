@@ -2,9 +2,26 @@
 
 > 事实记录：每个版本实际完成了什么、验证状态如何。不做承诺（承诺看 PLAN.md）。
 
-## v0.4.9（当前 HEAD）
+## v0.5.0（当前 HEAD，待发布）
 
-### 已发布（v0.4.3 → v0.4.9，全部推 GitHub + tag）
+### 已完成（Round A/B 三方审计 P1 全清 + P2 批量）
+
+| 批次 | 关键事项 | 验证 |
+|------|----------|------|
+| step ① | 诚实性修正（SECURITY.md 虚假声明 → 真实 sanitizeForVerifier 实现）、安装三连（包名/模型/Node 门槛）、编码事故修复、CHANGELOG 补 0.4.7-0.4.9 | typecheck + 测试全绿 |
+| step ② | F1 升级链 clamp + anomaly 透传（含面板 warning）；U-B1 escalationModel 接回同步路径 | 5 条升级链回归测试 |
+| steps ③④⑤⑥ | F3 NaN 协议加固、F4 images 双洞、F5 监听器泄漏、F6 共享并发闸门 + 服务缝走 runner（U-N2/U-N9）、U-N1 task_start 加固；F7-F13/F15-F17、U-B2/B3/B5/B6、U-N4/N5/N14 等批量；CI（GitHub Actions）；凭据解析加固（U-B4/U-N11/U-N7）+ history 轮转 | typecheck + **24/24** 测试 + build 全绿 + 实弹冒烟 |
+| prompt 对账 | /bestofn 提示词三处对齐实际行为：证据链绝对路径（U-N5 同款 bug）、unknown-smoke 三态（U-N14）、anomaly/warning 转述义务（F1） | typecheck + 测试 |
+
+### 测试现状
+
+- Offline 单测：**24 pass / 0 fail**（`npm test`：并发原语 11 + 升级链回归 5 + 凭据解析 8）
+- 面板回归：CDP 截图脚本（scripts/cdp_web_screenshot.mjs）机器实测
+- CI：GitHub Actions（build + host/client typecheck + 离线单测），推送后生效
+- 已知遗留（全部低优先级）：F14 死配置 maxCostPerVerification（文档已如实标注 v0.6.0 待办）、U-N8 Semaphore 死 API、statusWait 2s 轮询、i18n 层缺失——详见 CHANGELOG 0.5.0 与本地审计清单（AUDIT-*.md 不入库）
+- Composition/E2E/GUI 层：**未建**（见 PLAN.md）
+
+## v0.4.3 → v0.4.9（已发布）
 
 | 版本 | 关键事项 | 验证 |
 |------|----------|------|
@@ -15,13 +32,6 @@
 | v0.4.7 | 全徽章统一白话说明系统 | CDP 截图 |
 | v0.4.8 | 视觉三改：同色深底 / ABCD 字母 / 彩色仅徽章 | CDP 截图 |
 | v0.4.9 | 说明文字中性化 + 最优方案绿色恢复 | CDP 截图 |
-
-### 测试现状
-
-- Offline 单测：**11 pass / 0 fail**（`npm test`，测试文件非法 UTF-8 待修——Round B U-N1b）
-- 面板回归：CDP 截图脚本（scripts/cdp_web_screenshot.mjs）机器实测
-- 已知缺口（Round B 审计）：升级链 clamp 绕过（F1）、SECURITY.md 曾虚报（F2，v0.5.0 已改口+真实现）、NaN 协议挂死（F3）、images 双洞（F4）等，详见本地审计清单（AUDIT-*.md 不入库）
-- Composition/E2E/GUI 层：**未建**（见 PLAN.md）
 
 ## v0.4.2（已发布）
 
@@ -36,3 +46,5 @@
 |------|------|------|
 | 2026-08-22 | opencode DFLASH 投机解码导致 deepseek-v4-flash logprob 全灭（400） | 切 deepseek-v4-pro；README 对照表标注 |
 | 2026-08-22 | git 历史泄露 sk- 开头 API key | filter-repo 重写历史、强推、轮换 key |
+| 2026-08-23 | 内部审计报告误推公有仓库（违反负责任披露） | 撤回（22cf64a）+ .gitignore 兜底 |
+| 2026-08-23 | 开发会话中主机蓝屏 ×1 | AgentTeams 文件落盘设计兜底，审计产物零丢失 |

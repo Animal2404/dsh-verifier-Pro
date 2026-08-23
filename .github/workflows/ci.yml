@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install toolchain
+        run: npm install --no-audit --no-fund
+
+      # The host typecheck/tests import DSH peer packages (dsh-tools,
+      # cordis, ...). A global dsh install provides them; build.sh links the
+      # junctions from it (DSH_INSTALL layout).
+      - name: Install DSH peer bundle
+        run: |
+          npm install -g @deepseek-ai/dsh
+          echo "DSH_INSTALL=$(npm root -g)/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+
+      - name: Build (host + client)
+        run: bash scripts/build.sh
+
+      - name: Typecheck (host + client)
+        run: |
+          npx tsc -p tsconfig.json --noEmit
+          npx tsc -p tsconfig.client.json --noEmit
+
+      - name: Unit tests (offline, no API key needed)
+        run: node --test tests/*.test.mjs
