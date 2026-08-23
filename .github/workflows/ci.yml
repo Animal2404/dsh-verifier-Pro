@@ -79,5 +79,38 @@ jobs:
         run: |
           python -m pip install --quiet "llm-verifier>=0.2.0"
 
-      - name: bridge_fix offline suite (51 checks)
+      - name: bridge_fix offline suite
         run: python tests/test_bridge_fix.py
+
+  # 全量 job（审查 #2）：此前 harness 依赖的 tools.ts/bestofn 测试只在本地跑。
+  # DSH 宿主 peer 无法从公共 registry 完整安装，但 `pnpm add @deepseek-ai/dsh`
+  # 会把全部 peer/传递依赖铺进 .pnpm 虚拟存储；提升为顶层链接后，用
+  # `tsc --noCheck` 转译（测试只需要可运行的 JS，不需要类型正确）即可跑全量。
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install DSH bundle via pnpm (populates .pnpm peer store)
+        run: |
+          npm install -g pnpm@9
+          # 会写 package.json（CI 临时工作区，无害）；--ignore-workspace 防误判
+          pnpm add --ignore-workspace @deepseek-ai/dsh 2>&1 | tail -3
+
+      - name: Hoist harness peers from .pnpm store
+        run: node scripts/link_pnpm_peers.mjs
+
+      - name: Install @types/node
+        run: |
+          npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
+
+      - name: Transpile host with tsc --noCheck (runnable JS, not type-checked)
+        run: |
+          npx --yes -p typescript@5.9 tsc -p tsconfig.json --noCheck --declaration false
+
+      - name: Full node test suite (incl. harness-dependent tests)
+        run: node --test tests/*.test.mjs
