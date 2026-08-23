@@ -255,6 +255,22 @@ export interface EscalationDeps {
 }
 
 /**
+ * 审查 #6: literal-mc（采样近似）路径的成本与置信提示。
+ * score_mode 由桥在 compare/select 结果里透传（'logprobs' | 'literal-mc'）。
+ * literal-mc 默认 K=5 次采样（mc_n_evaluations=5）——单次结果方差大，
+ * 临界分差下不可靠；且成本 ≈ 5× 单次调用。返回的 note/warning 让模型和
+ * 用户都对「采样近似 + 成本」有预期，临界场景建议换 logprobs 模型复核。
+ */
+function literalMcNotes(scoreMode: unknown, margin: number): { note?: string; warning?: string } {
+  if (scoreMode !== 'literal-mc') return {}
+  const note = '评分路径：literal-mc（采样近似，默认 K=5 次调用）——精细判别请用 logprobs 模型'
+  const warning = Number.isFinite(margin) && margin < 0.15
+    ? '⚠️ 采样近似分在临界分差（<0.15）下不可靠——建议用 logprobs 模型复核'
+    : ''
+  return warning ? { note, warning } : { note }
+}
+
+/**
  * Bridge request under the scoring semaphore (when configured).
  * All expensive select/compare/tournament calls must go through this.
  */
@@ -271,8 +287,7 @@ async function gatedRequest<T>(
 
 /** Median duration of recent scoring calls, from persisted history. */
 async function estimateCallMs(deps: EscalationDeps): Promise<number> {
-  const durs = deps.store.readHistory(50)
-    .map((r) => r.duration_ms)
+  const durs = deps.store.readHistory(50)    .map((r) => r.duration_ms)
     .filter((d): d is number => typeof d === 'number' && d > 0)
     .sort((a, b) => a - b)
   if (!durs.length) return 60_000
@@ -346,12 +361,16 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       }
     }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
+    const mc = literalMcNotes(k1.score_mode, marginBefore)
     return {
       ...k1,
       cached: k1WasCached,
       escalated: false,
       // 审查 #4: flat/degraded 结果也携带耗时（用户需要知道花了多久）。
       duration_ms: Date.now() - started,
+      // 审查 #6: literal-mc 采样路径的成本/置信提示（临界分差建议 logprobs 复核）。
+      ...(mc.note ? { note: mc.note } : {}),
+      ...(mc.warning ? { warning: typeof k1.warning === 'string' ? `${k1.warning}；${mc.warning}` : mc.warning } : {}),
       ...(flat ? { signal: 'flat', warning: '两候选得分相同或接近，无可靠信号，建议细化标准或人工复核' } : {}),
     }
   }
@@ -430,6 +449,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   }
 
   const avg = (key: string): number => reps.reduce((s, r) => s + Number(r[key]), 0) / kUsed
+  const mc = literalMcNotes(k1.score_mode, marginBefore)
   const composite: Record<string, unknown> = {
     reward_a: avg('reward_a'),
     reward_b: avg('reward_b'),
@@ -442,6 +462,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     // 审查 #4: 结果携带真实耗时，让调用方/面板对成本有预期（history 中
     // compare 中位 ~10.8s，升级时 ×k_used）。
     duration_ms: Date.now() - started,
+    // 审查 #6: literal-mc 采样路径的成本/置信提示。
+    ...(mc.note ? { note: mc.note } : {}),
   }
   // F1: composite 不能丢掉 k1/reps 的异常标记——否则越界警告在升级后凭空消失。
   if (k1.anomaly !== undefined) {
@@ -450,6 +472,10 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   } else if (anyAnomaly) {
     composite.anomaly = 'reward_out_of_range'
     composite.warning = anomalyWarning
+  }
+  // 审查 #6: 临界分差的 literal-mc 采样分建议 logprobs 复核（无其他 warning 时）。
+  if (mc.warning && composite.warning === undefined) {
+    composite.warning = mc.warning
   }
   // R3-12: history must record the model that actually produced the scores —
   // tiered escalation spent the STRONGER model, and estimateCallMs reads this
@@ -574,10 +600,14 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
           : '所有候选得分相同或接近，排名无信号，必须用 compare 复核',
       }
     }
+    const mc = literalMcNotes(k1.score_mode, marginBefore)
     return {
       ...k1,
       cached: k1WasCached,
       escalated: false,
+      // 审查 #6: literal-mc 采样路径的成本/置信提示。
+      ...(mc.note ? { note: mc.note } : {}),
+      ...(mc.warning ? { warning: typeof k1.warning === 'string' ? `${k1.warning}；${mc.warning}` : mc.warning } : {}),
     }
   }
 
@@ -648,6 +678,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     ? s3.map((v, i) => (v + Number(s1[i])) / 2)
     : s3
   const marginAfter = topGap(averaged)
+  const mc = literalMcNotes(k1.score_mode, marginBefore)
   const composite: Record<string, unknown> = {
     ...escalated,
     scores: averaged,
@@ -661,11 +692,17 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     // 审查 #4: 真实耗时 + 候选数，供 renderResult 展示与大 N 异步提示。
     duration_ms: Date.now() - started,
     candidates_count: p.candidates.length,
+    // 审查 #6: literal-mc 采样路径的成本提示。
+    ...(mc.note ? { note: mc.note } : {}),
   }
   // F1: k1 的异常标记不因升级而丢失（escalated 自身的已在 spread 中带上）。
   if (composite.anomaly === undefined && k1.anomaly !== undefined) {
     composite.anomaly = k1.anomaly
     if (typeof k1.warning === 'string') composite.warning = k1.warning
+  }
+  // 审查 #6: 临界分差的 literal-mc 采样分建议 logprobs 复核。
+  if (mc.warning && composite.warning === undefined) {
+    composite.warning = mc.warning
   }
   // R3-12: record the model that actually scored (tiered escalation spent the
   // stronger tier; estimateCallMs sizes budgets from this file).

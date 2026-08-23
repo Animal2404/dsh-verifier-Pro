@@ -108,8 +108,11 @@ jobs:
         # 不装 @types/node：--noCheck 只转译不检查类型；且 npm 在 pnpm 布局的
         # node_modules 上跑会崩（"Cannot read properties of null (isDescendantOf)"）。
         # 不带 --declaration false：tsconfig 的 declarationDir 要求 declaration 开启。
+        # panelLogic.ts 在 tsconfig 的 exclude(src/client) 里，需单独编译（panel-logic 测试 import 它）。
         run: |
           npx --yes -p typescript@5.9 tsc -p tsconfig.json --noCheck
+          npx --yes -p typescript@5.9 tsc src/client/panelLogic.ts --outDir lib --rootDir src \
+            --module nodenext --moduleResolution nodenext --target es2022 --skipLibCheck --esModuleInterop
 
       - name: Full node test suite (incl. harness-dependent tests)
         run: node --test tests/*.test.mjs
