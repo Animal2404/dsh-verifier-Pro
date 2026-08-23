@@ -14,6 +14,7 @@
   "files": [
     "lib",
     "bridge",
+    "!bridge/__pycache__",
     "scripts/probe_logprobs.py",
     "scripts/setup.mjs",
     "scripts/evidence_chain.mjs",
