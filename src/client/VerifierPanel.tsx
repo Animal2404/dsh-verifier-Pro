@@ -145,6 +145,12 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
   // 否则越界分被静默裁剪后，用户看到的是绿色"正常"，防线形同虚设。
   const hasAnomaly = data?.anomaly === 'reward_out_of_range' || data?.anomaly === 'score_out_of_range'
     || (typeof data?.warning === 'string' && data.warning.includes('裁剪'))
+  // 评分路径透明（②）：literal-mc = 采样近似分（K 次采样均值），精度弱于
+  // logprobs 精确分布——必须在面板上明示，避免用户把近似分当精确分。
+  const scoreMode = typeof data?.score_mode === 'string' ? data.score_mode : null
+  const mcNote = scoreMode === 'literal-mc'
+    ? `🎲 采样近似分：模型不返回 logprobs，本分是 ${String(data?.k_used ?? data?.n_evaluations ?? '多次')} 次评分标签采样平均——方向可信，精细分差请用 logprobs 模型复核。`
+    : null
   const noticeText = STATE_NOTES[stateKey]
     ?? (hasAnomaly
       ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
@@ -202,6 +208,10 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
             <div style={styles.noticeDetail}>{hostDetail}</div>
           )}
         </div>
+      )}
+
+      {!running && mcNote && (
+        <div style={styles.noticeDetail}>{mcNote}</div>
       )}
 
       {expanded && (

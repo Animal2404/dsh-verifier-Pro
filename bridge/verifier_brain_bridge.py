@@ -316,11 +316,17 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
         "on_error", "client",
     })
     result = llm_verifier.select(problem=problem, candidates=candidates, **kwargs)
-    return _jsonable({
+    out = {
         "index": getattr(result, "index", None),
         "ranking": getattr(result, "ranking", None),
         "scores": getattr(result, "scores", None),
-    })
+    }
+    # Panel transparency (item ②): tag the scoring path.
+    if bridge_fix is not None and kwargs.get("model"):
+        mode = bridge_fix.score_mode_for(str(kwargs["model"]))
+        if mode in ("logprobs", "literal-mc"):
+            out["score_mode"] = mode
+    return _jsonable(out)
 
 
 def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
@@ -350,7 +356,14 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         "max_workers", "model", "client",
     })
     reward_a, reward_b = llm_verifier.compare(problem, candidate_a, candidate_b, **kwargs)
-    return _jsonable({"reward_a": reward_a, "reward_b": reward_b})
+    # Panel transparency (item ②): tag which scoring path produced the reward —
+    # 'logprobs' (official) vs 'literal-mc' (sampled score-tag fallback).
+    out = {"reward_a": reward_a, "reward_b": reward_b}
+    if bridge_fix is not None and kwargs.get("model"):
+        mode = bridge_fix.score_mode_for(str(kwargs["model"]))
+        if mode in ("logprobs", "literal-mc"):
+            out["score_mode"] = mode
+    return _jsonable(out)
 
 
 def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
