@@ -75,7 +75,7 @@ async function main() {
       candidate_a: 'The capital of France is Paris.',
       candidate_b: 'xkjdflkjsdlkfj lksdjflkjsd',
       criteria: { Correctness: 'Is the answer factually correct?' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     const margin = Math.abs(Number(r.reward_a) - Number(r.reward_b));
     if (margin < 0.8) throw new Error(`Expected large margin, got ${margin.toFixed(4)}`);
@@ -91,7 +91,7 @@ async function main() {
       candidate_a: 'def qsort(a): return a if len(a)<=1 else qsort([x for x in a[1:] if x<a[0]])+[a[0]]+qsort([x for x in a[1:] if x>=a[0]])',
       candidate_b: 'def qsort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[0]\n    left = [x for x in arr[1:] if x < pivot]\n    right = [x for x in arr[1:] if x >= pivot]\n    return qsort(left) + [pivot] + qsort(right)',
       criteria: { Correctness: 'Correct algorithm', Style: 'Readable code' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     // 两种结果都可接受：升级了（期望）或信号稳定（接近但方向明确）
     if (r.escalated) {
@@ -108,7 +108,7 @@ async function main() {
       problem: 'What is 2+2?',
       candidates: ['4', '4', '4'],
       criteria: { Correctness: 'Is it correct?' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.signal !== 'flat') throw new Error(`Expected signal:flat, got ${r.signal}`);
     return { signal: r.signal };
@@ -121,7 +121,7 @@ async function main() {
       candidate_a: '北京是中国的首都。',
       candidate_b: '巴黎是法国的首都。',
       criteria: { 正确性: '事实是否正确？', 清晰度: '表达是否清晰？' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.reward_a === undefined || r.reward_b === undefined) throw new Error('Missing rewards');
     return { reward_a: r.reward_a, reward_b: r.reward_b };
@@ -139,7 +139,7 @@ async function main() {
       candidate_a: 'Good answer with details.',
       candidate_b: 'Also good answer with details.',
       criteria: { Quality: 'Overall quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.escalated) throw new Error('Should NOT escalate with autoEscalate:false');
     return { escalated: r.escalated };
@@ -153,7 +153,7 @@ async function main() {
       candidate_a: 'Answer A with some detail.',
       candidate_b: 'Answer B with some detail.',
       criteria: { Quality: 'Quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     const status = await tasks.statusWait(taskId, 120);
     if (status.status !== 'done') throw new Error(`Task not done: ${status.status} ${status.error || ''}`);
@@ -182,7 +182,7 @@ async function main() {
         'def is_pal(s):\n    raise NotImplementedError  # broken stub',
       ],
       criteria: { Correctness: 'Correct palindrome check', Efficiency: 'Reasonable complexity' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     let r = await attempt();
     // 若第一组前二名恰好落入 flat 带（≤0.03），重试一组微调过的候选
@@ -197,7 +197,7 @@ async function main() {
           'def fact(n):\n    return "hello"  # nonsense output',
         ],
         criteria: { Correctness: 'Correct factorial', Style: 'Code quality' },
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-v4-pro',
       });
     }
     if (r.signal === 'flat') throw new Error(`No signal (all ≤0.03 apart): ${JSON.stringify(r.scores)}`);
@@ -214,7 +214,7 @@ async function main() {
       candidate_a: 'Candidate A for cache test.',
       candidate_b: 'Candidate B for cache test.',
       criteria: { Quality: 'Quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     };
     await runner('compare', params); // 第一次（可能升级并缓存）
     const r2 = await runner('compare', params); // 第二次（应命中缓存）
@@ -230,7 +230,7 @@ async function main() {
       candidate_a: 'const x = 42; // short and clear',
       candidate_b: 'const x = 42; // also short and clear',
       criteria: { Style: 'Code style quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.signal === 'unstable') {
       if (!Array.isArray(r.reps) || r.reps.length < 2) throw new Error('Unstable should include raw reps');

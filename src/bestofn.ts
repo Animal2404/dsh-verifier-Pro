@@ -58,6 +58,7 @@ function runEvidenceChain(
     let stdout = ''
     let stderr = ''
     let settled = false
+    let timedOut = false
     const finish = (result: { code: number; stdout: string }) => {
       if (settled) return
       settled = true
@@ -67,6 +68,7 @@ function runEvidenceChain(
     // Hard timeout: SIGTERM first (graceful), SIGKILL 5s later (stubborn).
     const killer = setTimeout(() => {
       if (!settled && child.pid) {
+        timedOut = true
         try { child.kill('SIGTERM') } catch { /* already dead */ }
         setTimeout(() => {
           if (!settled && child.pid) {
@@ -78,9 +80,11 @@ function runEvidenceChain(
     killer.unref()
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
-    child.on('close', (code, signal) => {
-      const timedOutNote = signal ? `\n[evidence_chain killed by signal=${signal} after ${timeoutMs}ms timeout]` : ''
-      finish({ code: code ?? (signal ? 124 : 1), stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + timedOutNote })
+    child.on('close', (code) => {
+      // F9: on Windows child.kill() yields signal=null — a boolean flag is the
+      // only portable way to know we timed out (smoke.mjs does the same).
+      const timedOutNote = timedOut ? `\n[evidence_chain killed after ${timeoutMs}ms timeout]` : ''
+      finish({ code: timedOut ? 124 : (code ?? 1), stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + timedOutNote })
     })
     child.on('error', (e) => finish({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` }))
   })
@@ -109,6 +113,9 @@ function smokeOk(outDir: string, name: string): boolean | undefined {
   }
 }
 
+/** F16: /bestofn spawns one member per candidate — keep fan-out sane. */
+const MAX_BESTOFN_N = 8
+
 function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; n: number } {
   const tokens = rawInput.trim().split(/\s+/).filter(Boolean)
   const positionals: string[] = []
@@ -121,24 +128,29 @@ function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<st
     if (tok === '--quick') { quick = true; continue }
     if (tok === '--local') { local = true; continue }
     if (tok === '--summary') {
-      const pair = tokens[i + 1]
-      if (pair && pair.includes('=')) {
+      // F16: summary text may contain spaces — consume tokens until the next
+      // option-like token instead of grabbing a single whitespace-split token.
+      const parts: string[] = []
+      let j = i + 1
+      while (j < tokens.length && !tokens[j].startsWith('-')) { parts.push(tokens[j]); j++ }
+      const pair = parts.join(' ')
+      if (pair.includes('=')) {
         const eq = pair.indexOf('=')
-        summaries.set(pair.slice(0, eq), pair.slice(eq + 1))
-        i++
+        summaries.set(pair.slice(0, eq).trim(), pair.slice(eq + 1))
+        i = j - 1
       }
       continue
     }
     if (tok === '-n' || tok === '--n') {
       const val = Number(tokens[i + 1])
-      if (Number.isFinite(val) && val > 0) n = Math.floor(val)
+      if (Number.isFinite(val) && val > 0) n = Math.min(Math.floor(val), MAX_BESTOFN_N)
       i++
       continue
     }
     // 尾部 [N]：团队模式允许 "goal... N" 形式——纯数字的最后一个 positional 当 N
     if (i === tokens.length - 1 && /^\d+$/.test(tok) && !local && positionals.length > 0) {
       const val = Number(tok)
-      if (val > 0) { n = Math.floor(val); continue }
+      if (val > 0) { n = Math.min(Math.floor(val), MAX_BESTOFN_N); continue }
     }
     positionals.push(tok)
   }
@@ -155,7 +167,7 @@ export function buildBestOfNActivation(goal: string, n: number): string {
     'Run the full loop:',
     '1. agent_teams: create team, add N members, assign each the SAME task (complete implementation).',
     '2. Collect N artifacts (each member saves its deliverable to a path).',
-    '3. Evidence chain per artifact: `node scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot.',
+    '3. Evidence chain per artifact: `node "' + join(pluginRoot, 'scripts', 'evidence_chain.mjs') + '" <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot.',
     '4. Survivor evidence blocks -> verifier select (adaptive K handles close margins).',
     '5. Integrate: hand ALL survivors + scores to an integrator agent to merge the best parts -> merge smoke -> verifier compare(merged, champion) gate.',
     '6. Deliver the final result + the full score report (never fabricate or round away scores).',
@@ -221,23 +233,33 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         }
       }
 
-      // 2) 崩溃候选出局
-      const survivors = blocks.filter((b) => {
-        const ok = smokeOk(outDir, b.name)
-        return ok !== false // 无 smoke 记录也保留（可能只有视觉证据）
-      })
-      const crashed = blocks.filter((b) => smokeOk(outDir, b.name) === false)
+      // 2) 崩溃候选出局；U-N14 三态化：smoke 记录缺失 = unknown，排除出
+      // 排名而不是默认幸存——基础设施失败（如 Chrome 缺失）时淘汰保证不再静默失效。
+      const smokeState = (name: string): 'ok' | 'crashed' | 'unknown' => {
+        const ok = smokeOk(outDir, name)
+        return ok === true ? 'ok' : ok === false ? 'crashed' : 'unknown'
+      }
+      const crashed = blocks.filter((b) => smokeState(b.name) === 'crashed')
+      const unknownSmoke = blocks.filter((b) => smokeState(b.name) === 'unknown')
+      const survivors = blocks.filter((b) => smokeState(b.name) === 'ok')
+
+      const crashLines = (): string => {
+        const parts: string[] = []
+        if (crashed.length) parts.push(`❌ 崩溃出局: ${crashed.map((c) => c.name).join(', ')}`)
+        if (unknownSmoke.length) parts.push(`❓ 无冒烟记录（不计入排名）: ${unknownSmoke.map((c) => c.name).join(', ')}`)
+        return parts.join('\n')
+      }
 
       if (survivors.length === 0) {
         return {
           kind: 'error',
-          text: `/bestofn: 全部候选冒烟失败，无幸存者。\n${crashed.map((c) => `  ❌ ${c.name}`).join('\n')}`,
+          text: `/bestofn: 没有通过冒烟验证的候选，无法排名。\n${crashLines()}`,
         }
       }
       if (survivors.length === 1) {
         return {
           kind: 'success',
-          text: `/bestofn: 仅一个候选存活（${survivors[0].name}），直接为冠军。\n${crashed.length ? `出局: ${crashed.map((c) => c.name).join(', ')}` : ''}`,
+          text: `/bestofn: 仅一个候选存活（${survivors[0].name}），直接为冠军。\n${crashLines()}`.trim(),
         }
       }
 
@@ -266,7 +288,8 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         if (selected.signal === 'unstable') {
           const lines: string[] = []
           lines.push(`## /bestofn 优选报告 — ⚠️ 信号不稳定`)
-          if (crashed.length) lines.push(`\n❌ 崩溃出局: ${crashed.map((c) => c.name).join(', ')}`)
+          const crashInfo = crashLines()
+          if (crashInfo) lines.push(`\n${crashInfo}`)
           lines.push(`\n多次评估胜者不一致，本次不产生冠军。全部原始评估如下，请人工复核：`)
           const reps = Array.isArray(selected.reps) ? selected.reps as Array<Record<string, unknown>> : []
           reps.forEach((r, i) => {
@@ -284,7 +307,8 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         const champion = survivors[index]?.name
         const lines: string[] = []
         lines.push(`## /bestofn 优选报告`)
-        if (crashed.length) lines.push(`\n❌ 崩溃出局: ${crashed.map((c) => c.name).join(', ')}`)
+        const crashInfo2 = crashLines()
+        if (crashInfo2) lines.push(`\n${crashInfo2}`)
         lines.push(`\n🏆 冠军: ${champion}`)
         lines.push(`排名: ${survivors.map((s, i) => `${i + 1}.${s.name} (${scores[i] !== undefined ? scores[i].toFixed(4) : '?'})`).join('  ')}`)
         if (selected.signal === 'flat') lines.push(`\n⚠️ 排名无信号（flat），建议用 compare 复核前二名`)

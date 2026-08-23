@@ -9,9 +9,9 @@
  * boot fails, and a speculative name simply never fires (safe).
  *
  * Current registration: the VerifierPanel renders under the keyed toolview
- * slot whenever a verifier tool result carries meta key `verifier`. The host
- * does not stamp that key yet (tracked in PLAN.md v0.5.x); wiring this now
- * keeps the client half shippable and testable end-to-end.
+ * slot whenever a verifier tool result carries meta key `verifier` (the host
+ * stamps it via presentationMeta — tools.ts `presentationMeta`, verified
+ * working since v0.4.4).
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { VerifierPanel } from './VerifierPanel.jsx'

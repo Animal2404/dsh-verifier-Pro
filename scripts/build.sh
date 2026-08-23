@@ -149,4 +149,10 @@ fi
 echo "=== Wrapping client bundle into ModuleLoader protocol ==="
 node scripts/wrap_client.mjs
 
+echo "=== Verifying client bundle (check_client) ==="
+# F17: CHANGELOG advertised this gate but build.sh never called it — wire it
+# in so a syntactically-broken client bundle fails the build instead of
+# silently killing the panel at render time.
+node scripts/check_client.mjs
+
 echo "=== Build complete ==="

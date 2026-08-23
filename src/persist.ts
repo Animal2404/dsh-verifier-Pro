@@ -1,7 +1,7 @@
-﻿/**
+/**
  * Durable state for verifier-brain: score history and async-task records as
  * JSON Lines under `~/.dsh/verifier-brain/`. Everything survives DSH
- * restarts and plugin reloads 鈥?fixing the reference implementation's
+ * restarts and plugin reloads — fixing the reference implementation's
  * "in-memory only" limitation.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -57,6 +57,18 @@ export class VerifierStore {
       if (record.task_id === taskId) latest = record
     }
     return latest
+  }
+
+  /**
+   * Latest record per task id from the on-disk log — used by the F11 cold
+   * recovery shim to find tasks stranded in `running` by a host restart.
+   */
+  readLatestTasks(): VerifierTaskRecord[] {
+    const latest = new Map<string, VerifierTaskRecord>()
+    for (const record of this.readLines<VerifierTaskRecord>(this.tasksFile)) {
+      latest.set(record.task_id, record)
+    }
+    return [...latest.values()]
   }
 
   private appendLine(file: string, value: unknown): void {

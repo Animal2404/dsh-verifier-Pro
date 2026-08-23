@@ -36,6 +36,20 @@ const LOOSE_OBJECT_SCHEMA = {
 /** Below this margin a score pair counts as flat (handled by existing logic). */
 const FLAT_EPSILON = 0.03
 
+// F15: hard upper bounds — n_evaluations multiplies into every tournament
+// pair × criterion (real cost-explosion vector); pivots/max_workers scale
+// similarly. The official package clamps pivots via min(k,n) but nothing
+// bounded n_evaluations.
+const MAX_N_EVALUATIONS = 8
+const MAX_PIVOTS = 20
+const MAX_MAX_WORKERS = 16
+
+/** Clamp an optional numeric param into [min, max]; non-numbers → undefined. */
+function boundParam(value: unknown, max: number, min = 1): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.max(min, Math.min(Math.floor(value), max))
+}
+
 /** Bridge payloads are JSON by protocol; satisfy the tool result contract. */
 const asToolResult = (value: unknown): Record<string, JsonValue> => value as Record<string, JsonValue>
 
@@ -222,6 +236,8 @@ async function estimateCallMs(deps: EscalationDeps): Promise<number> {
 
 /** compare with adaptive escalation + manual slot alternation on even reps. */
 async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  // F15: bound the cost-scaling knob (single choke point for every path).
+  p.n_evaluations = boundParam(p.n_evaluations, MAX_N_EVALUATIONS)
   // 传输层加固：候选/问题过 sanitize（长度上限 + 控制符剥离 + 注入短语中性化）。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeA = sanitizeForVerifier(p.candidate_a)
@@ -236,7 +252,9 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     ...(p.images ? { images: p.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
   })
 
-  const baseKey = JSON.stringify({ type: 'compare', problem: p.problem, a: p.candidate_a, b: p.candidate_b, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1 })
+  // F4: images participate in cache identity — different images must never
+  // share an entry within the LRU TTL (cross-result contamination).
+  const baseKey = JSON.stringify({ type: 'compare', problem: p.problem, a: p.candidate_a, b: p.candidate_b, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, images: p.images ?? null })
   const started = Date.now()
 
   // Escalated composite cache first (repeat calls hit this without new API spend).
@@ -291,6 +309,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   const extraAffordable = Math.floor((avail * 0.9) / Math.max(est, 1000))
   const extraReps = Math.min(deps.esc.maxEscalateK - 1, extraAffordable)
   if (extraReps < 1) {
+    // U-B3: budget-skip must land in history — estimateCallMs reads this file.
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
     return { ...k1, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
@@ -321,7 +341,13 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       r.reward_b = rb.value
       reps.push(r)
     } catch (error) {
-      if (reps.length < 2) throw error
+      // F13: k1 is already clamped and usable — a failed escalation rep must
+      // degrade to the first-pass result (like select), never discard it.
+      if (reps.length < 2) {
+        const msg = error instanceof Error ? error.message : String(error)
+        deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'escalation_failed' })
+        return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${msg}` }
+      }
       process.stderr.write(`[verifier-brain] escalation rep ${i} failed, continuing with ${reps.length} reps: ${error instanceof Error ? error.message : String(error)}\n`)
       break
     }
@@ -338,6 +364,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
 
   // Direction-inconsistent: report raw, never silently average.
   if (agreeing < Math.ceil(kUsed / 2)) {
+    // U-B2: unstable results must be persisted for audit/cost accounting.
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'unstable' })
     return {
       signal: 'unstable',
       escalated: true,
@@ -374,6 +402,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
 
 /** select with adaptive escalation (official tournament handles reps internally). */
 async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  // F15: bound the cost-scaling knobs at the single choke point every path
+  // (tool / task_start / service seam) flows through.
+  p.n_evaluations = boundParam(p.n_evaluations, MAX_N_EVALUATIONS)
+  p.pivots = boundParam(p.pivots, MAX_PIVOTS)
+  p.max_workers = boundParam(p.max_workers, MAX_MAX_WORKERS)
   // 传输层加固：问题与每个候选过 sanitize。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeCandidates = p.candidates.map((c) => sanitizeForVerifier(c))
@@ -386,18 +419,32 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     ...(p.pivots !== undefined ? { pivots: p.pivots } : {}),
     ...(p.seed !== undefined ? { seed: p.seed } : {}),
     ...(p.max_workers !== undefined ? { max_workers: p.max_workers } : {}),
+    // F4: official contract is "every entry point accepts images" — the tool
+    // layer used to silently drop them before they even reached the bridge.
+    ...(p.images ? { images: p.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
   })
 
-  const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed })
+  // F4: images in the key — same reason as compare (no TTL-window contamination).
+  const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed, images: p.images ?? null })
   const started = Date.now()
   // 官方 score cache（降本1，第二轮审计修正）：官方 cache_key = crit|task|索引|rep，
   // 不含 problem/候选内容/model —— 全局持久化会造成跨任务投毒（audit2 report-b 实证）。
   // 修正：cache 文件改为【每次调用独立临时文件】——只保留单次锦标赛内
   // warm-up/fan-out 的复用收益，绝不跨任务。供应商前缀缓存已覆盖跨运行节省。
   const selectCachePath = join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+  // F12: every temp cache file this call creates is deleted when the call
+  // settles — success, error, or early return. %TEMP% used to accumulate one
+  // orphan file per invocation (escalation created a second one).
+  const tempCacheFiles: string[] = [selectCachePath]
+  const cleanupTempCaches = (): void => {
+    for (const file of tempCacheFiles) {
+      try {
+        if (existsSync(file)) unlinkSync(file)
+      } catch { /* best-effort */ }
+    }
+  }
   try {
-    if (existsSync(selectCachePath)) unlinkSync(selectCachePath)
-  } catch { /* best-effort */ }
+    // —— runSelect 主体：所有 return/throw 都会经过底部 finally 清理 ——
 
   const escCached = resultCache.get(baseKey + ':esc')
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
@@ -456,6 +503,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   const elapsed = Date.now() - started
   const avail = deps.budgetMs() - elapsed
   if (avail < elapsed * 2 * 1.1 || deps.esc.maxEscalateK < 3) {
+    // U-B3: budget-skip must land in history — estimateCallMs reads this file.
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
     return { ...k1, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
@@ -467,13 +516,18 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     const escCachePath = escModel === p.model
       ? selectCachePath
       : join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+    if (escCachePath !== selectCachePath) tempCacheFiles.push(escCachePath)
     escalated = await gatedRequest<Record<string, unknown>>(deps, 'select',
       { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
   } catch (error) {
+    // U-B3: degraded-to-k1 is still a real scored call — log it.
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
     return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
 
   if (escalated.index !== k1.index) {
+    // U-B2: unstable results must be persisted for audit/cost accounting.
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'unstable' })
     return {
       signal: 'unstable',
       escalated: true,
@@ -521,6 +575,10 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: composite.index as number, scores: averaged, duration_ms: Date.now() - started })
   resultCache.set(baseKey + ':esc', Promise.resolve(composite))
   return composite
+  } finally {
+    // F12: guaranteed temp-cache cleanup on every settle path.
+    cleanupTempCaches()
+  }
 }
 
 /** Async-task runner: routes select/compare through adaptive escalation. */
@@ -570,6 +628,29 @@ export function createVerifierTaskManager(
   const records = new Map<string, VerifierTaskRecord>()
   let seq = 0
 
+  // F11 cold recovery: tasks left `running` by a previous process can never
+  // finish (the worker died with the host) — they used to poll forever. Mark
+  // them interrupted, and resume the id sequence past any existing ids so a
+  // restart cannot mint colliding `verifier-N` ids.
+  try {
+    const previous = store.readLatestTasks()
+    for (const record of previous) {
+      const m = /^verifier-(\d+)$/.exec(record.task_id)
+      if (m) seq = Math.max(seq, Number(m[1]))
+      if (record.status === 'running') {
+        store.appendTask({
+          ...record,
+          status: 'error',
+          ts: new Date().toISOString(),
+          error: 'interrupted: host/plugin restarted while the task was running',
+        })
+      }
+    }
+  } catch { /* best-effort — recovery must never block startup */ }
+
+  /** F11/U-N3: bound the in-memory table (long sessions grew it forever). */
+  const MAX_MEMORY_TASKS = 200
+
   return {
     start(method: string, params: Record<string, unknown>, timeoutMs?: number): string {
       const taskId = `verifier-${++seq}`
@@ -577,6 +658,13 @@ export function createVerifierTaskManager(
       const record: VerifierTaskRecord = { task_id: taskId, method, params, status: 'running', ts: now() }
       records.set(taskId, { ...record })
       store.appendTask(record)
+      // F11/U-N3: evict oldest in-memory records beyond the cap (disk keeps
+      // everything; this only bounds long-session memory growth).
+      while (records.size > MAX_MEMORY_TASKS) {
+        const oldest = records.keys().next().value
+        if (oldest === undefined) break
+        records.delete(oldest)
+      }
       void (async () => {
         const started = Date.now()
         try {
@@ -633,6 +721,12 @@ export interface ToolsOptions {
   escalation?: EscalationOptions
   /** Max concurrent scoring calls into the bridge (P0-3; default 4, mirrors maxWorkers). */
   maxConcurrentScoring?: number
+  /**
+   * F6: shared concurrency gate. When provided (by index.ts), the SAME gate
+   * also bounds the async runner and service seam — one cap across every
+   * scoring path instead of a tool-only limit.
+   */
+  scoringGate?: Semaphore
 }
 
 interface VerifierToolArgs {
@@ -677,13 +771,16 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
   }
   if (value.index !== undefined || value.ranking !== undefined) {
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n⚠️ ${value.warning}` : ''}` }
   }
   if (value.reward_a !== undefined) {
     const flags = [
       value.escalated !== undefined ? `escalated=${value.escalated}` : null,
       value.cached !== undefined ? `cached=${value.cached}` : null,
       typeof value.note === 'string' ? `note: ${value.note}` : null,
+      // F1: anomaly/warning must stay visible on ok/escalated results too —
+      // a silently-clipped score must never render as a clean green result.
+      typeof value.warning === 'string' ? `⚠️ ${value.warning}` : null,
     ].filter(Boolean).join(', ')
     return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${flags ? `\n[${flags}]` : ''}` }
   }
@@ -706,7 +803,9 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
   const { getBridge, store, tasks, defaultModel, taskTimeoutMs, syncBudgetMs, escalation } = options
   const withDefaultModel = (model?: string): string | undefined => model ?? defaultModel
   // P0-3 hardening: bound concurrent scoring calls (default mirrors maxWorkers=4).
-  const scoringGate = new Semaphore(options.maxConcurrentScoring ?? 4)
+  // F6: prefer the shared gate from index.ts so tool calls, async tasks,
+  // /bestofn and the service seam all draw from one concurrency budget.
+  const scoringGate = options.scoringGate ?? new Semaphore(options.maxConcurrentScoring ?? 4)
   const deps: EscalationDeps = {
     getBridge,
     store,
@@ -748,11 +847,11 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         wait_seconds: { type: 'number', description: 'Block up to N seconds (cap 300) for task completion; recommended 120. task_status.' },
         criteria: { type: 'string', description: 'Preset name (e.g. "terminal_bench") or JSON object string like {"Correctness":"..."}. select/compare.' },
         model: { type: 'string', description: 'Verifier model id; defaults to the configured backend model.' },
-        n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion (default 1).' },
-        pivots: { type: 'number', description: 'Tournament pivots (default 2; more = more accurate, more costly). select.' },
+        n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion (default 1; hard cap 8).' },
+        pivots: { type: 'number', description: 'Tournament pivots (default 2; more = more accurate, more costly; hard cap 20). select.' },
         images: { type: 'string', description: 'Comma-separated image paths/URLs; multimodal backends only.' },
         seed: { type: 'number', description: 'Random seed. select.' },
-        max_workers: { type: 'number', description: 'Max parallel verifier workers. select.' },
+        max_workers: { type: 'number', description: 'Max parallel verifier workers (hard cap 16). select.' },
       },
       output: {
         schema: LOOSE_OBJECT_SCHEMA,
@@ -810,14 +909,25 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
           case 'track': {
             if (!args.problem) throw new Error('verifier track requires `problem`')
             if (!args.steps?.length) throw new Error('verifier track requires `steps`')
+            // U-N4: validate checkpoint_steps before they hit the official
+            // package (undefined behavior on empty/out-of-order/non-integers).
+            if (args.checkpoint_steps !== undefined) {
+              const cs = args.checkpoint_steps as unknown[]
+              const valid = Array.isArray(cs) && cs.length > 0
+                && cs.every((n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1)
+              if (!valid) throw new Error('verifier track `checkpoint_steps` must be a non-empty array of positive integers (1-based step indices)')
+            }
             const started = Date.now()
-            const result = await bridge.request<Record<string, unknown>>('track', {
+            // U-N4: track goes through the shared concurrency gate like every
+            // other scoring call (it spawns real tournament work upstream).
+            const trackExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('track', {
               problem: args.problem,
               steps: args.steps,
               ...(args.checkpoint_steps !== undefined ? { checkpoint_steps: args.checkpoint_steps } : {}),
               ...(model ? { model } : {}),
               ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
             }, undefined, signal)
+            const result = await (scoringGate ? scoringGate.run(trackExec, signal) : trackExec())
             store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: args.problem, model, scores: result.scores, duration_ms: Date.now() - started })
             return asToolResult(result)
           }
@@ -846,11 +956,31 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             return asToolResult(await bridge.request<Record<string, unknown>>('progress_close', { tracker_id: args.tracker_id }, undefined, signal))
           }
           case 'task_start': {
+            // U-N1: only the three scoring methods may be scheduled.
+            const asyncMethod = String(args.method ?? 'select')
+            if (asyncMethod !== 'select' && asyncMethod !== 'compare' && asyncMethod !== 'track') {
+              return { error: `task_start method must be select, compare or track (got "${asyncMethod}")` }
+            }
             let params: Record<string, unknown>
             try {
-              params = JSON.parse(String(args.params ?? '').trim())
+              const parsed: unknown = JSON.parse(String(args.params ?? '').trim())
+              // U-N1: arrays/null would previously be persisted into
+              // tasks.jsonl verbatim and explode downstream — reject early.
+              if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                return { error: 'task_start requires `params` as a JSON object string like "{\\"problem\\": ...}"' }
+              }
+              params = parsed as Record<string, unknown>
             } catch {
               return { error: 'task_start requires `params` as a valid JSON object string' }
+            }
+            // U-N1: criteria is REQUIRED for scoring methods — the bridge
+            // would otherwise silently swap in its DEFAULT_CRITERIA (silent
+            // semantic drift + part of the injection surface).
+            if (asyncMethod !== 'track') {
+              const c = params.criteria
+              if (c === undefined || c === null || (typeof c === 'string' && !c.trim())) {
+                return { error: `task_start ${asyncMethod} requires \`criteria\` inside params (a preset name or a JSON object string of criteria)` }
+              }
             }
             if (typeof params.criteria === 'string' && /^[[{]/.test(params.criteria.trim())) {
               try {
@@ -860,7 +990,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               }
             }
             if (defaultModel && params.model === undefined) params.model = defaultModel
-            const taskId = tasks.start(String(args.method ?? 'select'), params, taskTimeoutMs)
+            const taskId = tasks.start(asyncMethod, params, taskTimeoutMs)
             return { task_id: taskId, status: 'running', hint: `poll verifier task_status with task_id=${taskId} (wait_seconds=120 avoids blind polling; a select with pivots typically takes 2+ minutes)` }
           }
           case 'task_status': {

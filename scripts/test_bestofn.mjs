@@ -23,7 +23,11 @@ const env = {
 
 const stateDir = mkdtempSync(join(tmpdir(), 'bestofn-test-'))
 const store = new VerifierStore(stateDir)
-const bridge = new PythonBridge(join(ROOT, 'bridge/verifier_brain_bridge.py'), join(ROOT, '.venv/Scripts/python.exe'), 300_000, env)
+// U-B6: portable python resolution — the old hardcoded .venv/Scripts path
+// only worked on Windows checkouts.
+const pythonBin = process.env.VB_PYTHON
+  ?? (process.platform === 'win32' ? join(ROOT, '.venv/Scripts/python.exe') : join(ROOT, '.venv/bin/python'))
+const bridge = new PythonBridge(join(ROOT, 'bridge/verifier_brain_bridge.py'), pythonBin, 300_000, env)
 const getBridge = async () => bridge
 const runner = createEscalationRunner({ getBridge, store, esc: { autoEscalate: true, escalateThreshold: 0.15, maxEscalateK: 3 }, budgetMs: () => 1_800_000 })
 
@@ -37,7 +41,7 @@ const mockCtx = {
   _def: null,
 }
 
-registerBestOfNCommand(mockCtx, { getBridge, store, runner, defaultModel: 'deepseek-v4-flash' })
+registerBestOfNCommand(mockCtx, { getBridge, store, runner, defaultModel: 'deepseek-v4-pro' })
 console.log('注册的命令:', mockCtx._def?.name, '|', mockCtx._def?.description)
 
 const handler = mockCtx._def.handler

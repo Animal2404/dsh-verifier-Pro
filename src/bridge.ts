@@ -33,8 +33,13 @@ export class BridgeError extends Error {
 interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
-  timer: NodeJS.Timeout
   abortHandler?: () => void
+  /**
+   * F5: removes the abort listener from the caller's signal and clears the
+   * timeout. Must run on EVERY settle path (success, error, timeout, abort,
+   * write failure) — leaked closures used to hold the pending map alive.
+   */
+  cleanup: () => void
 }
 
 export class PythonBridge {
@@ -123,23 +128,32 @@ export class PythonBridge {
     const budget = timeoutMs ?? this.timeoutMs
 
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let timer: NodeJS.Timeout | undefined
+      let abortHandler: (() => void) | undefined
+      // F5: one cleanup shared by every settle path — the caller's signal must
+      // never accumulate dead listeners across long-lived plugin sessions.
+      const cleanup = () => {
+        if (timer !== undefined) clearTimeout(timer)
+        if (abortHandler && signal) signal.removeEventListener('abort', abortHandler)
+      }
+
+      timer = setTimeout(() => {
         this.pending.delete(id)
+        cleanup()
         reject(new BridgeError('BridgeTimeout', `python bridge timed out after ${budget}ms (method=${method})`))
       }, budget)
 
       const pending: PendingRequest = {
         resolve: resolve as (value: unknown) => void,
         reject,
-        timer,
+        cleanup,
       }
 
       // Handle AbortSignal
-      let abortHandler: (() => void) | undefined
       if (signal) {
         abortHandler = () => {
           this.pending.delete(id)
-          clearTimeout(timer)
+          cleanup()
           reject(new BridgeError('BridgeAborted', 'request aborted by caller'))
         }
         signal.addEventListener('abort', abortHandler)
@@ -155,16 +169,14 @@ export class PythonBridge {
 
       if (!this.child?.stdin.writable) {
         this.pending.delete(id)
-        clearTimeout(timer)
-        if (abortHandler && signal) signal.removeEventListener('abort', abortHandler)
+        cleanup()
         reject(new BridgeError('BridgeWriteError', 'python bridge stdin is not writable'))
         return
       }
       this.child.stdin.write(payload + '\n', (error) => {
         if (error) {
           this.pending.delete(id)
-          clearTimeout(timer)
-          if (abortHandler && signal) signal.removeEventListener('abort', abortHandler)
+          cleanup()
           reject(new BridgeError('BridgeWriteError', `failed to write to python bridge: ${error.message}`))
         }
       })
@@ -191,6 +203,17 @@ export class PythonBridge {
       parsed = JSON.parse(line) as BridgeResponse<unknown> | BridgeErrorResponse
     } catch {
       process.stderr.write(`[verifier-brain:python] non-JSON stdout: ${line}\n`)
+      // F3 defense-in-depth: a malformed frame may be a corrupted response for
+      // a pending request. Correlate by id when possible and fail fast instead
+      // of letting the request dangle until its full budget timeout.
+      const m = /"id"\s*:\s*(\d+)/.exec(line)
+      const id = m ? m[1] : undefined
+      const pending = id ? this.pending.get(id) : undefined
+      if (pending && id) {
+        this.pending.delete(id)
+        pending.cleanup()
+        pending.reject(new BridgeError('BridgeProtocolError', `malformed JSON frame from bridge (correlated id=${id})`))
+      }
       return
     }
     if (parsed.id === null || parsed.id === undefined) return
@@ -198,7 +221,7 @@ export class PythonBridge {
     const pending = this.pending.get(id)
     if (!pending) return
     this.pending.delete(id)
-    clearTimeout(pending.timer)
+    pending.cleanup()
     if (parsed.ok) {
       pending.resolve((parsed as BridgeResponse<unknown>).result)
     } else {
@@ -209,7 +232,7 @@ export class PythonBridge {
 
   private failAllPending(error: Error): void {
     for (const [, pending] of this.pending) {
-      clearTimeout(pending.timer)
+      pending.cleanup()
       pending.reject(error)
     }
     this.pending.clear()

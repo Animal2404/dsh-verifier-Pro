@@ -143,8 +143,20 @@ window.addEventListener('error', e => window.__errs.push(String(e.message)));
 window.addEventListener('unhandledrejection', e => window.__errs.push('unhandledrejection: ' + String(e.reason)));
 'ok'`
 
+// ---------- F10: collision-proof artifact naming ----------
+// Two candidates in different directories may share a basename (two
+// `index.html`); the later one used to silently overwrite the earlier one's
+// .smoke.json. A short hash of the resolved path disambiguates while staying
+// deterministic across build_evidence.mjs (which derives names identically).
+import { createHash } from 'node:crypto'
+const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
+function artifactName(file) {
+  const stem = basename(file).replace(/\.[^.]+$/, '')
+  return `${stem}-${shortHash(resolve(file))}`
+}
+
 async function smokeHtml(cdp, file, outDir) {
-  const name = basename(file).replace(/\.[^.]+$/, '')
+  const name = artifactName(file)
   const fileUrl = 'file:///' + resolve(file).replace(/\\/g, '/')
   // 清空上一候选的异常残留，避免会话级收集器跨候选串扰
   cdp.collectedExceptions.length = 0
@@ -244,7 +256,7 @@ async function main() {
   await Promise.all(nodeFiles.map(async (f) => {
     const r = await smokeNode(f)
     results.push(r)
-    writeFileSync(join(OUT_DIR, basename(f).replace(/\.[^.]+$/, '') + '.smoke.json'), JSON.stringify(r, null, 2), 'utf8')
+    writeFileSync(join(OUT_DIR, artifactName(f) + '.smoke.json'), JSON.stringify(r, null, 2), 'utf8')
   }))
 
   // HTML 冒烟（共享一个 CDP 会话）
@@ -255,7 +267,7 @@ async function main() {
         for (const f of htmlFiles) {
           const r = await smokeHtml(cdp, f, OUT_DIR)
           results.push(r)
-          writeFileSync(join(OUT_DIR, basename(f).replace(/\.[^.]+$/, '') + '.smoke.json'), JSON.stringify(r, null, 2), 'utf8')
+          writeFileSync(join(OUT_DIR, artifactName(f) + '.smoke.json'), JSON.stringify(r, null, 2), 'utf8')
         }
       } finally {
         cdp.close()

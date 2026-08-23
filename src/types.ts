@@ -78,6 +78,8 @@ export interface VerifierHistoryRecord {
   tracker_id?: string
   step?: string
   duration_ms?: number
+  /** U-B2/U-B3: why a non-composite result was logged (unstable/budget/degraded). */
+  note?: string
 }
 
 /** One persisted async-task record (tasks.jsonl transitions). */

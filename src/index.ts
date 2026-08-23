@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-verifier-pro 鈥?LLM-as-a-Verifier brain for DSH.
+ * @dsh-external/dsh-verifier-pro — LLM-as-a-Verifier brain for DSH.
  *
  * Exposes the official llm-verifier framework (fine-grained logprob rewards:
  * select / compare / track / ProgressTracker) as DSH agent tools through a
@@ -15,7 +15,8 @@
  * The bridge never uses ctx.llm: DSH's streaming interface does not expose
  * logprobs, which the fine-grained reward estimation requires.
  *
- * 瑙勮寖锛氳祫婧愭敞鍐屽叏閮ㄦ寕 ctx.effect锛堢儹閲嶈浇/鍗歌浇鑷姩娓呯悊锛夈€? */
+ * 规范：资源注册全部挂 ctx.effect（热重载/卸载自动清理）。
+ */
 import type { Context } from 'cordis'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -28,6 +29,7 @@ import { VerifierStore } from './persist.js'
 import { verifierUsageSection, bestOfNProtocolSection } from './prompt.js'
 import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
+import { Semaphore } from './concurrency.js'
 import { registerBestOfNCommand } from './bestofn.js'
 
 export const name = '@dsh-external/dsh-verifier-pro'
@@ -163,12 +165,30 @@ export function apply(ctx: Context, config: Config): void {
     maxEscalateK: config.maxEscalateK ?? 3,
     escalationModel: config.escalationModel,
   }
-  const runner = createEscalationRunner({ getBridge, store, esc: escalation, budgetMs: () => config.taskTimeoutMs ?? 1_800_000 })
+  // F6: one shared concurrency gate for EVERY scoring path — sync tools,
+  // async tasks / /bestofn (runner), and the service seam. Previously only
+  // the tool path was gated; N parallel tasks could storm the bridge and
+  // the provider (rate-limit + cost spike).
+  const scoringGate = new Semaphore(config.maxWorkers ?? 4)
+  const runner = createEscalationRunner({
+    getBridge,
+    store,
+    esc: escalation,
+    budgetMs: () => config.taskTimeoutMs ?? 1_800_000,
+    scoringGate,
+  })
 
   const tasks = createVerifierTaskManager(getBridge, store, config.taskTimeoutMs ?? 1_800_000, runner)
 
   // Service seam for other plugins: ctx.verifierBrain.select({...}) etc.
-  ctx.plugin(VerifierBrainService, getBridge as never)
+  // U-N2/U-N9: routed through the same runner as the tools — cache, clamp,
+  // escalation, concurrency gate, history, and defaultModel injection now
+  // apply to service callers too (no more silent gemini fallback → 401).
+  ctx.plugin(VerifierBrainService, {
+    getBridge,
+    run: runner,
+    defaultModel: config.verifierModel,
+  } as never)
 
   registerVerifierTools(ctx, {
     getBridge,
@@ -179,6 +199,7 @@ export function apply(ctx: Context, config: Config): void {
     syncBudgetMs: config.bridgeTimeoutMs ?? 300_000,
     escalation,
     maxConcurrentScoring: config.maxWorkers ?? 4,
+    scoringGate,
   })
 
   // M4-B: /bestofn command (lazily when the commands registry is mounted)

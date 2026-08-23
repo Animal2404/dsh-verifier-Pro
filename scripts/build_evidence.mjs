@@ -115,9 +115,18 @@ function renderDescribe(d) {
   return parts.length ? parts.join('\n') : `(描述: ${d.raw?.slice(0, 200) || '无'})`
 }
 
+// F10: must match smoke.mjs's artifactName() exactly — stem + short hash of
+// the resolved path — so same-basename candidates never collide.
+import { createHash } from 'node:crypto'
+const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
+function artifactName(input) {
+  const stem = basename(input).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+  return `${stem}-${shortHash(resolve(input))}`
+}
+
 function buildBlock(input, summary) {
   const { smoke, describe } = resolveRelated(input)
-  const name = basename(input).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+  const name = artifactName(input)
   const lines = []
   lines.push(`── candidate: ${name} ──`)
   if (summary) {
@@ -140,7 +149,7 @@ async function main() {
   const globalText = readText(global)
   mkdirSync(OUT_DIR, { recursive: true })
   const blocks = INPUTS.map((input) => {
-    const name = basename(input).replace(/\.(html?|js|cjs|mjs|smoke\.json|describe\.json)$/i, '')
+    const name = artifactName(input)
     // 逐候选 summary 优先（--summary name=text），否则全局
     const summary = per.has(name) ? per.get(name) : globalText
     return buildBlock(input, summary)

@@ -89,3 +89,19 @@ test('U-B1 fallback: without escalationModel, reps keep caller model', async () 
   await run('compare', { problem: 'p', candidate_a: 'a', candidate_b: 'b', model: 'cheap-model' })
   assert.ok(bridge.calls.slice(1).every((c) => c.model === 'cheap-model'), 'reps fall back to caller model')
 })
+
+test('F13: first escalation rep failure degrades to k1 instead of discarding it', async () => {
+  const bridge = fakeBridge([
+    { reward_a: 0.55, reward_b: 0.60 }, // k1: margin 0.05 → escalate
+    () => { throw new Error('bridge exploded') }, // rep 2 fails
+  ])
+  const run = createEscalationRunner(baseDeps(bridge, {}))
+  // distinct problem text — the module-level resultCache is shared across
+  // tests in one process, and an identical key would return the cached
+  // escalated composite from the first test instead of exercising the failure.
+  const out = await run('compare', { problem: 'p-f13-degrade', candidate_a: 'a', candidate_b: 'b' })
+  assert.equal(out.escalated, false)
+  assert.equal(Number(out.reward_a), 0.55, 'k1 reward preserved')
+  assert.equal(Number(out.reward_b), 0.60, 'k1 reward preserved')
+  assert.ok(typeof out.note === 'string' && out.note.includes('保留首评'), 'degrade note present')
+})

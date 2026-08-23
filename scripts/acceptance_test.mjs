@@ -115,7 +115,7 @@ async function main() {
       candidate_a: 'The capital of France is Paris.',
       candidate_b: 'xkjdflkjsdlkfj lksdjflkjsd',
       criteria: { Correctness: 'Is the answer factually correct?' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     const margin = Math.abs(r.reward_a - r.reward_b);
     if (margin < 0.8) throw new Error(`Expected large margin, got ${margin}`);
@@ -130,7 +130,7 @@ async function main() {
       candidate_a: 'function add(a,b){return a+b;} // clean, correct',
       candidate_b: 'function add(a,b){return a+b;} // also clean, correct',
       criteria: { Correctness: 'Is it correct?', Style: 'Is it readable?' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (!r.escalated) throw new Error('Should escalate for close margin');
     if (r.k_used !== 3) throw new Error(`Expected k_used=3, got ${r.k_used}`);
@@ -147,7 +147,7 @@ async function main() {
       problem: 'What is 2+2?',
       candidates: ['4', '4', '4'],
       criteria: { Correctness: 'Is it correct?' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.signal !== 'flat') throw new Error(`Expected signal:flat, got ${r.signal}`);
     return { signal: r.signal };
@@ -160,7 +160,7 @@ async function main() {
       candidate_a: '北京是中国的首都。',
       candidate_b: '巴黎是法国的首都。',
       criteria: { 正确性: '事实是否正确？', 清晰度: '表达是否清晰？' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (r.reward_a === undefined || r.reward_b === undefined) throw new Error('Missing rewards');
     return { reward_a: r.reward_a, reward_b: r.reward_b };
@@ -173,7 +173,7 @@ async function main() {
       candidate_a: 'Good answer with details.',
       candidate_b: 'Also good answer.',
       criteria: { Quality: 'Overall quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       n_evaluations: 1,
     }, 60000);
     // With autoEscalate=false at config level, but we can't override via bridge directly
@@ -190,7 +190,7 @@ async function main() {
         candidate_a: 'Answer A with some detail.',
         candidate_b: 'Answer B with some detail.',
         criteria: { Quality: 'Quality' },
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-v4-pro',
       },
     });
     if (!taskId.tracker_id && !taskId.task_id) throw new Error('No task id returned');
@@ -222,7 +222,7 @@ async function main() {
         'Solution E: Poor solution.',
       ],
       criteria: { Quality: 'Overall quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (!r.escalated) throw new Error('Should escalate for close margin in select');
     if (r.k_used !== 3) throw new Error(`Expected k_used=3, got ${r.k_used}`);
@@ -237,7 +237,7 @@ async function main() {
       candidate_a: 'Candidate A for cache test.',
       candidate_b: 'Candidate B for cache test.',
       criteria: { Quality: 'Quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     // Second call (should hit cache)
     const r = await bridgeRequest('compare', {
@@ -245,7 +245,7 @@ async function main() {
       candidate_a: 'Candidate A for cache test.',
       candidate_b: 'Candidate B for cache test.',
       criteria: { Quality: 'Quality' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     if (!r.cached) throw new Error('Expected cached:true on second call');
     return { cached: r.cached };
@@ -260,7 +260,7 @@ async function main() {
       candidate_a: 'Answer with minor advantage.',
       candidate_b: 'Answer with minor different advantage.',
       criteria: { Nuance: 'Subtle quality differences' },
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
     });
     // Either stable (averaged) or unstable (raw reps) is valid
     if (r.signal === 'unstable') {

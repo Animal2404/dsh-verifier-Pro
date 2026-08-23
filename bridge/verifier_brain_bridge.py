@@ -36,6 +36,7 @@ plain JSON. All heavy logic lives in the official `llm_verifier` package.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import threading
@@ -74,8 +75,15 @@ DEFAULT_CRITERIA: dict[str, str] = {
 
 
 def _jsonable(value: Any) -> Any:
-    """Convert numpy/Python objects to plain JSON-safe values."""
-    if value is None or isinstance(value, (str, int, float, bool)):
+    """Convert numpy/Python objects to plain JSON-safe values.
+
+    F3: non-finite floats (NaN/inf/-inf) are washed to None. json.dumps would
+    otherwise emit bare NaN/Infinity tokens — invalid JSON that the TS side
+    cannot parse, leaving the request dangling until its full budget timeout.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
@@ -369,12 +377,13 @@ def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
             logprobs_supported = isinstance(reward_a, (int, float)) and isinstance(reward_b, (int, float))
         except Exception as e:
             logprobs_error = str(e)
-            # Check if error indicates missing logprobs
-            if "logprob" in str(e).lower() or "does not support" in str(e).lower():
-                logprobs_supported = False
-            else:
-                # Other error, assume logprobs might work
-                logprobs_supported = True
+            # F7: fail-closed classification. Auth (401), quota (402),
+            # network and rate-limit failures used to fall into the "other
+            # error → assume logprobs might work" branch, green-lighting a
+            # broken backend. Only a successful numeric compare proves
+            # logprobs support; every exception reports unsupported so the
+            # host warns instead of silently scoring 0.5.
+            logprobs_supported = False
         
         return {
             "model": model,
@@ -407,7 +416,11 @@ _HANDLERS: dict[str, Any] = {
 
 
 def _write_response(stream: TextIO, payload: dict[str, Any]) -> None:
-    stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    # F3: allow_nan=False guarantees every protocol frame is valid JSON — any
+    # residual non-finite value raises here and becomes an error response
+    # (handled by _process_line) instead of a corrupt frame.
+    stream.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
+    stream.flush()
     stream.flush()
 
 

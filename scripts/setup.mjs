@@ -88,7 +88,8 @@ const KNOWN_BACKENDS = [
   {
     envKey: 'OPENCODE_GO_API_KEY',
     label: 'OpenCode Zen',
-    model: 'deepseek-v4-flash',
+    // U-B5: flash 被上游禁用 logprobs 返回（400），v4-pro 实测可用。
+    model: 'deepseek-v4-pro',
     baseUrl: 'https://opencode.ai/zen/go/v1',
     applyUrl: 'https://opencode.ai',
   },
@@ -592,11 +593,17 @@ function writePatchConfig(root, backend) {
   const text = readTextSafe(patchPath);
   if (text == null) return { written: false, error: 'cordis.patch.yml 不存在' };
 
-  // 备份
+  // 备份（F8: 只保留最近 3 份，防 .bak.<ts> 无限堆积）
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupPath = `${patchPath}.bak.${timestamp}`;
   try {
     fs.copyFileSync(patchPath, backupPath);
+    const dir = path.dirname(patchPath);
+    const base = path.basename(patchPath);
+    const olds = fs.readdirSync(dir).filter((f) => f.startsWith(`${base}.bak.`)).sort();
+    for (const old of olds.slice(0, Math.max(0, olds.length - 3))) {
+      try { fs.unlinkSync(path.join(dir, old)); } catch { /* best-effort */ }
+    }
   } catch (e) {
     return { written: false, error: `备份失败：${e.message}` };
   }
@@ -618,11 +625,39 @@ function writePatchConfig(root, backend) {
   }
   newText = lines.join('\n');
 
+  // F8: 缺行时插入到 verifier-brain 条目的 config 块，而不是假成功。
+  if (!vmReplaced || !bbReplaced) {
+    const insLines = [];
+    if (!vmReplaced) insLines.push(`verifierModel: ${backend.model}`);
+    if (!bbReplaced) insLines.push(`backendBaseUrl: ${backend.baseUrl}`);
+    const lines2 = newText.split('\n');
+    let insertAt = -1;
+    let indent = '      ';
+    for (let i = 0; i < lines2.length; i++) {
+      if (/^[ \t]*-[ \t]+id:[ \t]*["']?verifier-brain["']?\s*$/.test(lines2[i])) {
+        for (let j = i + 1; j <= i + 5 && j < lines2.length; j++) {
+          const m = lines2[j].match(/^([ \t]*)config:[ \t]*$/);
+          if (m) { insertAt = j + 1; indent = m[1] + '  '; break; }
+        }
+        break;
+      }
+    }
+    if (insertAt >= 0) {
+      insLines.forEach((l, k) => lines2.splice(insertAt + k, 0, indent + l));
+      newText = lines2.join('\n');
+    } else {
+      return { written: false, error: 'cordis.patch.yml 缺少 verifier-brain 条目或其 config 块；请手动添加 verifierModel/backendBaseUrl 两行后重试 --fix' };
+    }
+  }
+
+  // F8: 原子写（tmp + rename），失败时恢复备份。
+  const tmpPath = `${patchPath}.tmp-${process.pid}`;
   try {
-    fs.writeFileSync(patchPath, newText, 'utf8');
+    fs.writeFileSync(tmpPath, newText, 'utf8');
+    fs.renameSync(tmpPath, patchPath);
   } catch (e) {
-    // 恢复备份
-    try { fs.copyFileSync(backupPath, patchPath); } catch {}
+    try { fs.rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
+    try { fs.copyFileSync(backupPath, patchPath); } catch { /* best-effort */ }
     return { written: false, error: `写入失败：${e.message}` };
   }
 
