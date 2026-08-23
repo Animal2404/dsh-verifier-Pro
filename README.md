@@ -80,7 +80,7 @@ bash scripts/build.sh
 | `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
-> 📌 **模型评分路径（v0.5.0）**：
+> 📌 **模型评分路径（v0.6.0）**：
 > - **logprobs 路径（精确）**：`deepseek-v4-flash-vision-exp`（默认）、`qwen3.7-plus`、`qwen3.6-plus`。
 > - **literal-mc 路径（采样近似，模型不返回 logprobs 时的降级）**：`minimax-m3`、`minimax-m2.7`、
 >   `mimo-v2.5-pro`、`muse-spark-1.2-contributor`、`deepseek-v4-flash`（桥自动路由，见下）。
@@ -184,8 +184,8 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxWorkers` | `4` | 桥内并发 worker |
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
-| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 实现预算拦截，当前为预留配置项（暂不生效）** |
-| `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），用于成本估算（预留） |
+| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 已实现预算拦截**：基于 history 真实耗时×费率估算，超预算拒绝 |
+| `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），预算拦截的费率输入 |
 | `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算（预留） |
 
 ### 配置详解（这个文件是干嘛的、怎么改）
@@ -297,7 +297,7 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 
 ```bash
 # 1) 安装（推荐钉扎）
-dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.5.0
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.6.0
 
 # 2) 检查环境（凭据 + .venv + 产物一次诊断）
 cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
