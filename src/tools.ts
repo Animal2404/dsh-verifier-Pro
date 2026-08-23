@@ -350,6 +350,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       ...k1,
       cached: k1WasCached,
       escalated: false,
+      // 审查 #4: flat/degraded 结果也携带耗时（用户需要知道花了多久）。
+      duration_ms: Date.now() - started,
       ...(flat ? { signal: 'flat', warning: '两候选得分相同或接近，无可靠信号，建议细化标准或人工复核' } : {}),
     }
   }
@@ -939,10 +941,11 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     return { type: 'text', text: `⚠️ 信号不可信（degraded）：${String(value.warning ?? '全部分量精确等于 0.5，评估疑似批量失败')}。本结果不可用于排名。` }
   }
   if (value.signal === 'flat') {
+    const secs = typeof value.duration_ms === 'number' ? ` ⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : ''
     if (value.reward_a !== undefined) {
-      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${secs}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
     }
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
   }
   if (value.index !== undefined || value.ranking !== undefined) {
     // 审查 #4: 展示真实耗时；大候选数时提示异步路径（select 中位 ~37.8s）。
