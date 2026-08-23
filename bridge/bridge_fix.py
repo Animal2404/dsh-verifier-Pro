@@ -211,6 +211,28 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
 # call_verifier router — drop-in replacement for llm_verifier.fine_grained_reward.call_verifier
 # ---------------------------------------------------------------------------
 
+# P2-③ 先推理再打分（借鉴 GenPRM：显式 CoT 推理提升判断准确率，而不是直接
+# 拍分数）。评分提示词前追加分步推理指令，让模型先论证再给 <score_X> 标签。
+# 环境变量 VERIFIER_BRAIN_REASON_FIRST=0 可关闭（默认开）。
+_REASON_FIRST = (
+    "\n\nBefore scoring, reason step by step: "
+    "1) restate what each candidate actually does; "
+    "2) evaluate each against the criteria explicitly; "
+    "3) identify any concrete defect or advantage with evidence. "
+    "Then, and only then, emit the final <score_X> tags."
+)
+
+
+def _maybe_reason_first(prompt: str) -> str:
+    flag = os.environ.get("VERIFIER_BRAIN_REASON_FIRST", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return prompt
+    # 幂等：已带指令的 prompt 不再重复拼接。
+    if "Before scoring, reason step by step" in prompt:
+        return prompt
+    return prompt + _REASON_FIRST
+
+
 def _make_router(previous):
     """Build a call_verifier replacement that keeps the official path for
     logprobs-capable models and uses the logprobs-free path for the rest."""
@@ -218,6 +240,7 @@ def _make_router(previous):
 
     def router(client, prompt, model=fgr.DEFAULT_MODEL, top_logprobs=20,
                images=None):
+        prompt = _maybe_reason_first(prompt)
         mode = score_mode_for(str(model))
         if mode == "literal-mc":
             return call_no_logprobs(client, prompt, str(model),

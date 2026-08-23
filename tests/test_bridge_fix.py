@@ -71,6 +71,26 @@ def test_profiles():
           bridge_fix.effective_n_evaluations("deepseek-v4-pro", None) == 1)
 
 
+def test_reason_first():
+    print("[P2-③ reason-first prompt]")
+    import os
+    prompt = "Score these candidates."
+    # default ON
+    os.environ.pop("VERIFIER_BRAIN_REASON_FIRST", None)
+    out = bridge_fix._maybe_reason_first(prompt)
+    check("default appends reasoning instruction",
+          "reason step by step" in out and out.startswith(prompt))
+    # idempotent
+    out2 = bridge_fix._maybe_reason_first(out)
+    check("idempotent (no double append)",
+          out2.count("reason step by step") == 1)
+    # env OFF
+    os.environ["VERIFIER_BRAIN_REASON_FIRST"] = "0"
+    check("env=0 disables",
+          bridge_fix._maybe_reason_first(prompt) == prompt)
+    os.environ.pop("VERIFIER_BRAIN_REASON_FIRST", None)
+
+
 # ---------------------------------------------------------------------------
 # offline: literal-tag extraction through the OFFICIAL extract_score
 # ---------------------------------------------------------------------------
@@ -221,6 +241,7 @@ def main():
     test_profiles()
     test_extraction()
     test_router_dispatch()
+    test_reason_first()
     print(f"\noffline: {PASS} passed, {FAIL} failed")
     if "--live" in sys.argv:
         live_test()

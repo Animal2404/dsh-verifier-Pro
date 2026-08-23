@@ -211,6 +211,34 @@ function clamp01(value: unknown): { value: number; clamped: boolean } {
   return { value: c, clamped: c !== n }
 }
 
+/**
+ * P2-③ 异常响应形态检测（借鉴 CompassVerifier 的异常/无效响应识别，扩展
+ * exact-flat 单一护栏）。基于 clamp 后的分数数组做机械检测（诚实范围——
+ * 只从分数结构推断，不读模型内部）：
+ *   1. 存在 NaN/非有限 → 评分器输出异常（clamp01 已把 null 洗成 NaN）
+ *   2. 全 0.5 → 批量失败被 tie 掩蔽（已有 degraded 护栏，这里统一返回形态名）
+ *   3. 全挤极端（全部 ≥0.95 或全部 ≤0.05）且候选数 ≥2 → 「无区分」疑似
+ *      给分随意/退化（不是合法 flat，flat 是分散的相近）
+ * 返回 null = 形态正常；否则 { shape, hint }。
+ */
+function detectAnomalousShape(scores: unknown[], kind: 'compare' | 'select'): { shape: string; hint: string } | null {
+  const nums = scores.map((s) => Number(s)).filter((n) => Number.isFinite(n))
+  // 1) NaN 泄漏（非有限值存在）
+  if (nums.length !== scores.length) {
+    return { shape: 'non_finite', hint: '评分包含 NaN/非有限值——评分器输出异常，结果不可用' }
+  }
+  if (nums.length === 0) return null
+  // 2) 全 0.5（tie 掩蔽批量失败，compare/select 均适用）
+  if (nums.every((n) => n === 0.5)) {
+    return { shape: 'exact_flat', hint: '全部候选精确等于 0.5——评估批量失败被 on_error="tie" 掩蔽的特征，不是真实平局' }
+  }
+  // 3) 全挤极端（≥2 个候选且全部 ≥0.95 或全部 ≤0.05）——「给分随意」退化
+  if (nums.length >= 2 && (nums.every((n) => n >= 0.95) || nums.every((n) => n <= 0.05))) {
+    return { shape: 'degenerate_extreme', hint: '所有分数挤在同一极端（≥0.95 或 ≤0.05）——疑似评分器给分随意/退化，区分度存疑' }
+  }
+  return null
+}
+
 export interface EscalationDeps {
   getBridge: () => Promise<PythonBridge>
   store: VerifierStore
@@ -291,8 +319,14 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   k1.reward_b = cb.value
 
   const marginBefore = Math.abs(Number(k1.reward_a) - Number(k1.reward_b))
-  // exact-flat 护栏（降本3）：双侧精确 0.5 是 tie 掩蔽批量失败的特征签名。
-  const compareExactFlat = Number(k1.reward_a) === 0.5 && Number(k1.reward_b) === 0.5
+  // P2-③ 异常响应形态检测（扩展 exact-flat 单一护栏）：NaN / 全 0.5 /
+  // 全挤极端等退化形态统一识别并打 anomaly 警告。
+  const shapeIssue = detectAnomalousShape([k1.reward_a, k1.reward_b], 'compare')
+  if (shapeIssue && k1.anomaly === undefined) {
+    k1.anomaly = 'anomalous_shape'
+    k1.warning = `⚠️ 响应形态异常（${shapeIssue.shape}）：${shapeIssue.hint}——请人工复核或更换评分模型。`
+  }
+  const compareExactFlat = shapeIssue?.shape === 'exact_flat'
   const doEscalate = deps.esc.autoEscalate
     && !compareExactFlat
     && Number.isFinite(marginBefore)
@@ -484,6 +518,13 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       k1.warning = `⚠️ 部分候选评分越界，已裁剪到 [0,1]（raw: ${JSON.stringify(rawScores)}）—— 疑似评分模型异常或被注入，请人工复核。`
     }
     k1.scores = clamped.map((c) => c.value)
+    // P2-③ 异常响应形态检测（扩展 exact-flat 单一护栏）：NaN / 全 0.5 /
+    // 全挤极端等退化形态统一识别并打 anomaly 警告。
+    const shapeIssue = detectAnomalousShape(clamped.map((c) => c.value), 'select')
+    if (shapeIssue && k1.anomaly === undefined) {
+      k1.anomaly = 'anomalous_shape'
+      k1.warning = `⚠️ 响应形态异常（${shapeIssue.shape}）：${shapeIssue.hint}——请人工复核或更换评分模型。`
+    }
   }
 
   // exact-flat 护栏（降本3，审计二修正版）：全分量精确 =0.5 有两种成因——
@@ -513,11 +554,23 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       }
     }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
+    if (flat) {
+      // P2-③: flat（无排名信号）与 anomaly（形态异常）可共存——异常警告
+      // 不能被平局文案覆盖（此前全挤极端的分被 flat 分支吞掉警告）。
+      return {
+        ...k1,
+        cached: k1WasCached,
+        escalated: false,
+        signal: 'flat',
+        warning: k1.anomaly !== undefined
+          ? `${String(k1.warning ?? '')} 且：所有候选得分相同或接近，排名无信号，必须用 compare 复核`
+          : '所有候选得分相同或接近，排名无信号，必须用 compare 复核',
+      }
+    }
     return {
       ...k1,
       cached: k1WasCached,
       escalated: false,
-      ...(flat ? { signal: 'flat', warning: '所有候选得分相同或接近，排名无信号，必须用 compare 复核' } : {}),
     }
   }
 
