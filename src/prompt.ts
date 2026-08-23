@@ -7,6 +7,10 @@
  * only the first half of Best-of-N; the second half is an integrator agent
  * merging each candidate's best parts, with a verifier compare as the gate.
  */
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+
+const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
 export function verifierUsageSection(defaultModel?: string): string {
   const modelNote = defaultModel ? ` Verifier model: ${defaultModel}.` : ''
@@ -27,6 +31,7 @@ Reading the scores:
 - A flat result (all candidates scored identically, signal:"flat") carries NO ranking signal — never adopt its ranking as-is; confirm the top two with verifier compare.
 - Prefer pairwise compare for small N (2-3): it is cheaper, faster, and more discriminating than a full tournament. Reserve select for larger pools.
 - Close margins are handled automatically: when a margin falls in the noise band the system re-evaluates (K=3, slot-alternating) and returns an averaged result with escalation metadata (escalated / k_used / margin_before / margin_after). Report these metadata alongside the outcome. If you see signal:"unstable", present all raw scores and recommend human review — never average them yourself.
+- If a result carries an anomaly/warning field (out-of-range scores were clipped into [0,1]), treat the score as UNRELIABLE — it suggests the scoring model misbehaved or was manipulated. Surface the warning to the user verbatim and recommend human review; do not rank on it silently.
 - Trust observed output, NOT the agent's narration: candidate summaries must be backed by verifiable evidence (smoke-test results, runtime-error counts, hard facts extracted from the actual artifact), never by the author's self-reported feature claims. When artifacts are runnable, smoke-test each one first (e.g. headless run + console-error capture) and feed the results into scoring; a candidate that crashes at runtime must be rejected regardless of its claims.
 
 Best-of-N means merge, not just rank:
@@ -50,7 +55,7 @@ export function bestOfNProtocolSection(): string {
 
 1. Spawn exactly N members via agent_teams, each assigned the SAME task: deliver a COMPLETE independent implementation of the goal. Never split the task into aspects per member (that is decomposition, not Best-of-N; partial candidates break ranking). Diversity must come from independent implementations.
 2. Collect N artifacts. Each member saves its deliverable to a path and reports it.
-3. Evidence chain per artifact: run \`node scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>\` in the plugin root. A candidate whose smoke result is ok=false (crash, exit!=0, runtime error) is eliminated on the spot — it never reaches scoring.
+3. Evidence chain per artifact: run \`node "${join(pluginRoot, 'scripts', 'evidence_chain.mjs')}" <artifact> --summary <name>=<self-description>\` (absolute path — it lives in the plugin install, not your workspace). A candidate whose smoke result is ok=false (crash, exit!=0, runtime error) is eliminated on the spot; a candidate with NO smoke record (unknown) is also excluded from ranking — never assume it survived.
 4. Survivor evidence blocks → verifier select (adaptive K handles close margins automatically; flat results carry no ranking signal — confirm the top two with compare).
 5. Integrate: hand ALL survivors plus their scores to an integrator agent (a member or a fresh captain pass) to merge the best parts of each into one deliverable. Do not just take the champion — that is ranking, not Best-of-N.
 6. Gate: run the merged artifact through the evidence chain, then verifier compare(merged, champion). Adopt the merged version only if it scores at least as high as the champion (within noise); otherwise fall back to the champion and say why.
