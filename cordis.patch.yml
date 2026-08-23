@@ -35,6 +35,7 @@
         maxEscalateK: 3
         # 分级评分（U-B1 已接通同步路径）：设置后仅升级轮使用更强模型，
         # 首评保持廉价档。留空 = 与 verifierModel 相同（不混平均）。
+        # v4-pro 仅作此可选贵档（优先级最后）——日常评分用 flash-vision-exp。
         # escalationModel: deepseek-v4-pro
 
 # Client UI（Verifier panel + settings）不走 cordis insert：

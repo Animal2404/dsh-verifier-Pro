@@ -62,13 +62,18 @@ environment** — adjust these two lines to match your own credentials:
 | Credentials you hold | verifierModel | backendBaseUrl | Tested |
 |---|---|---|---|
 | `DEEPSEEK_API_KEY` (DeepSeek official) | `deepseek-chat` | `https://api.deepseek.com` | ✅ recommended |
-| `OPENCODE_GO_API_KEY` (opencode) | `deepseek-v4-pro` | `https://opencode.ai/zen/go/v1` | ⚠️ flash banned |
+| `OPENCODE_GO_API_KEY` (opencode) | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ verified (default) |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | unverified |
 
-> ⚠️ **Since 2026-08-22 do not score with opencode's `deepseek-v4-flash`**: upstream enabled
-> DFLASH speculative decoding for this model, rejecting every logprob request (400 "does not
-> support return_logprob"). Plain chat is unaffected, but verifier scoring requires logprobs.
-> Working alternatives on the same endpoint: `deepseek-v4-pro`, `qwen3.8-max`.
+> ✅ **Default: `deepseek-v4-flash-vision-exp`** (logprobs path, cheap, verified).
+> Also verified on the opencode endpoint: `qwen3.7-plus`, `qwen3.6-plus` (logprobs path),
+> and via the literal-mc sampling path: `minimax-m3`, `minimax-m2.7`, `mimo-v2.5-pro`,
+> `muse-spark-1.2-contributor`, `deepseek-v4-flash` (no logprobs needed — bridge routes them
+> through literal score-tag sampling).
+> `deepseek-v4-pro` remains available but is **lowest priority** (expensive; use only when
+> the cheaper verified models are unavailable or for escalation-tier scoring).
+> ⚠️ `deepseek-v4-flash` (without vision-exp) rejects logprobs requests (DFLASH 400) — it
+> works only via the literal-mc path above; plain `hy3` is unsupported entirely.
 
 Your chosen model must return **logprobs** — that's the foundation of fine-grained rewards.
 Verify with `node scripts/probe_logprobs.py <model>`, or batch-scan candidates via
@@ -113,14 +118,16 @@ Smart input detection: plain text = goal (team mode); existing file paths = loca
       config:
         bridgeTimeoutMs: 300000
         taskTimeoutMs: 1800000
-        verifierModel: deepseek-v4-pro
+        verifierModel: deepseek-v4-flash-vision-exp
         backendBaseUrl: https://opencode.ai/zen/go/v1
         maxWorkers: 4
         promptSection: true
         autoEscalate: true
         escalateThreshold: 0.15
         maxEscalateK: 3
-        escalationModel: deepseek-v4-pro   # optional tiered scoring: stronger model for escalation reps only
+        # optional tiered scoring: stronger model for escalation reps only —
+        # v4-pro is the expensive last-resort tier; leave unset to reuse verifierModel
+        # escalationModel: deepseek-v4-pro
 ```
 
 | Key | Default | Notes |
