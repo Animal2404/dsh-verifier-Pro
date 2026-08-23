@@ -155,6 +155,20 @@ def _version_tuple(version: str) -> tuple[int, int, int] | None:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
 
 
+# D-1x: models cap top_logprobs below the official default of 20 (e.g. Qwen
+# on this proxy only accepts [0,5]). Cap per-model so those models can score
+# instead of 400-ing. 20 remains the default for models without a known cap.
+_TOP_LOGPROBS_CAP = {"qwen": 5}
+
+
+def _top_logprobs_cap(model: str) -> int:
+    lowered = (model or "").lower()
+    for needle, cap in _TOP_LOGPROBS_CAP.items():
+        if needle in lowered:
+            return cap
+    return 20
+
+
 def _require_library() -> None:
     if llm_verifier is None:
         raise RuntimeError(
@@ -169,6 +183,24 @@ def _require_library() -> None:
         raise RuntimeError(
             f"llm-verifier {ver} is too old (need >= 0.2.0). Run: pip install -U 'llm-verifier>=0.2.0'"
         )
+    # D-1x: every scoring call funnels through fine_grained_reward.call_verifier
+    # (compare/select/track/progress). Wrap it to cap top_logprobs per model so
+    # models like qwen (cap 5) can score; the official default of 20 stays for
+    # models with no known cap.
+    try:
+        from llm_verifier import fine_grained_reward as _fgr
+        if not getattr(_fgr, "_dsh_capped", False):
+            _orig = _fgr.call_verifier
+
+            def _capped(client, prompt, model=_fgr.DEFAULT_MODEL, top_logprobs=20, images=None):
+                capped = min(int(top_logprobs or 20), _top_logprobs_cap(str(model)))
+                return _orig(client, prompt, model=model, top_logprobs=capped, images=images)
+
+            _fgr.call_verifier = _capped
+            _fgr._dsh_capped = True
+    except Exception:
+        # Patching is best-effort; without it some models 400 on top_logprobs.
+        pass
 
 
 _CLIENT = None
