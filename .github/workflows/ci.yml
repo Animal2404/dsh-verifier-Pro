@@ -104,11 +104,9 @@ jobs:
           # dsh-compact，但 host 源码不用它）。cordis 无 scope 版本 4.0.0-rc.8。
           pnpm add --ignore-workspace @deepseek-ai/dsh-tools@0.1.1-rc.2 cordis@4.0.0-rc.8 schemastery 2>&1 | tail -3
 
-      - name: Install @types/node
-        run: |
-          npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
-
       - name: Transpile host with tsc --noCheck (runnable JS, not type-checked)
+        # 不装 @types/node：--noCheck 只转译不检查类型；且 npm 在 pnpm 布局的
+        # node_modules 上跑会崩（"Cannot read properties of null (isDescendantOf)"）。
         run: |
           npx --yes -p typescript@5.9 tsc -p tsconfig.json --noCheck --declaration false
 
