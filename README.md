@@ -90,6 +90,14 @@ bash scripts/build.sh
 > 要求：logprobs 路径的模型必须支持 **token 级 logprobs 返回**（细粒度 reward 的根基）。
 > literal-mc 路径的模型则要求能按提示词输出 `<score_X>` 字母标签（桥自动探测/按档案路由）。
 > 面板会标注本次评分用的是哪条路径；精细判别建议用 logprobs 模型。
+>
+> **默认模型判别力实测（v0.6.0，A/B 对照）**：默认的 `deepseek-v4-flash-vision-exp`
+> 与 `deepseek-v4-pro` 在粗判别（sumTo 循环 vs 公式）、细判别（fib 递归 vs 迭代，
+> 双方均正确）、中文判别（中文实现+中文 criteria）三个任务上**方向判定全部一致且正确**，
+> flash-vision-exp 的 margin 甚至更大（0.46/0.49/0.31 vs 0.35/0.41/0.21）。
+> 早期曾观察到 flash-vision-exp 在细判别任务上 flat（0.499/0.500）——该问题已被
+> **reason-first 提示词**（评分前先分步推理再给 `<score_X>`，见 bridge/bridge_fix.py）
+> 修复。默认模型无需更换。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
 `.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>` 可验证你的端点是否返回 logprobs；
