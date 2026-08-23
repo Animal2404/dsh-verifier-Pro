@@ -273,9 +273,14 @@ async function main() {
     await withChrome(async () => {
       const cdp = await cdpConnect(CDP_PORT)
       try {
-        // R3-10: inject the error collector ONCE for the whole session (see
-        // smokeHtml for why per-candidate injection was wrong).
-        await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ERR_COLLECTOR })
+        // R3-10: inject the error collector ONCE per session. #15: a reused
+        // EXTERNAL Chrome connection (--remote-debugging-port) across smoke
+        // runs would re-inject per run — track on the connection so a given
+        // browser target never accumulates duplicate collectors.
+        if (!cdp.__errCollectorInjected) {
+          await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ERR_COLLECTOR })
+          cdp.__errCollectorInjected = true
+        }
         for (const f of htmlFiles) {
           const r = await smokeHtml(cdp, f, OUT_DIR)
           results.push(r)

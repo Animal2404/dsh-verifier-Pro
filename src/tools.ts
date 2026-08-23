@@ -685,7 +685,7 @@ export function createEscalationRunner(deps: EscalationDeps) {
       // scoreable — admit them alongside true-logprobs models.
       const scoreMode = probe.score_mode
       if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
-        throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型、literal-mc 模型，或去掉 model 参数。`)
+        throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型、literal-mc 模型，或去掉 model 参数。 [verifier cannot score with model ${modelParam}: ${String(probe.logprobs_error ?? 'no token-level logprobs from this backend')} — use a logprobs-capable or literal-mc model, or drop the model arg]`)
       }
     }
     if (method === 'compare') {
@@ -854,6 +854,9 @@ export function createVerifierTaskManager(
         // R3-17: honor the caller's abort — a cancelled poll used to spin
         // for the full 300s (2s snapshots + disk reads every iteration).
         if (signal?.aborted) return { task_id: taskId, status: 'cancelled' }
+        // #13: status() is memory-first (records.values()) — running tasks
+        // poll in-memory only, no disk reads per 2s tick; disk fallback is
+        // only for cold-start recovery of previously-persisted tasks.
         const snapshot = this.status(taskId)
         if (snapshot.status !== 'running' || Date.now() >= deadline) return snapshot
         await new Promise((resolve) => setTimeout(resolve, 2000))
@@ -882,6 +885,12 @@ export interface ToolsOptions {
    * scoring path instead of a tool-only limit.
    */
   scoringGate?: Semaphore
+  /** #11: hard USD budget per verification (0 = unlimited). Enforced by
+   * estimating spend from real persisted durations × configured rates before
+   * each scoring call. */
+  maxCostPerVerification?: number
+  costPer1kInputTokens?: number
+  costPer1kOutputTokens?: number
 }
 
 interface VerifierToolArgs {
@@ -961,6 +970,25 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
   // F6: prefer the shared gate from index.ts so tool calls, async tasks,
   // /bestofn and the service seam all draw from one concurrency budget.
   const scoringGate = options.scoringGate ?? new Semaphore(options.maxConcurrentScoring ?? 4)
+  // #11: 真实成本预算守卫——用 history 的真实耗时 × 配置费率估算本调用成本，
+  // 超预算则拒绝（诚实实现，不再是无效果的预留配置）。
+  const maxCost = options.maxCostPerVerification
+  const costInRate = options.costPer1kInputTokens ?? 0
+  const costOutRate = options.costPer1kOutputTokens ?? 0
+  const costGuard = async (kind: 'select' | 'compare' | 'track'): Promise<void> => {
+    if (!maxCost || maxCost <= 0 || (costInRate <= 0 && costOutRate <= 0)) return
+    const recent = store.readHistory(20)
+      .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
+    if (recent.length === 0) return
+    const medianMs = recent.map((r) => r.duration_ms as number).sort((a, b) => a - b)[Math.floor(recent.length / 2)]
+    // 粗估：1 秒 ≈ 300 input token + 100 output token（保守量级），按费率折现。
+    const estUsd = (medianMs / 1000) * (300 * costInRate + 100 * costOutRate) / 1000
+    const spent = recent.reduce((s, r) => s + (r.duration_ms as number), 0) / 1000
+    const spentUsd = spent * (300 * costInRate + 100 * costOutRate) / 1000
+    if (spentUsd + estUsd > maxCost) {
+      throw new Error(`verifier 成本预算拦截：本次估算 ~$${estUsd.toFixed(4)}，累计 ~$${spentUsd.toFixed(4)} 超预算 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
+    }
+  }
   const deps: EscalationDeps = {
     getBridge,
     store,
@@ -1038,11 +1066,12 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
           // also scoreable — admit them alongside true-logprobs models.
           const scoreMode = probe.score_mode
           if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
-            return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型）、literal-mc 模型，或去掉 model 参数。` }
+            return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型）、literal-mc 模型，或去掉 model 参数。 [verifier cannot score with model ${String(args.model)}: ${String(probe.logprobs_error ?? 'no token-level logprobs')} — use a logprobs-capable or literal-mc model, or drop the model arg]` }
           }
         }
         switch (args.action) {
           case 'select': {
+            await costGuard('select')
             if (!args.problem) throw new Error('verifier select requires `problem`')
             if (!args.candidates?.length) throw new Error('verifier select requires `candidates`')
             if (!args.criteria) throw new Error('verifier select requires `criteria`')
@@ -1061,6 +1090,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             return asToolResult(result)
           }
           case 'compare': {
+            await costGuard('compare')
             if (!args.problem) throw new Error('verifier compare requires `problem`')
             if (typeof args.candidate_a !== 'string') throw new Error('verifier compare requires `candidate_a`')
             if (typeof args.candidate_b !== 'string') throw new Error('verifier compare requires `candidate_b`')

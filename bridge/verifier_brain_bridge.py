@@ -576,59 +576,33 @@ def _handle_usage(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
-    """Probe the verifier backend for logprobs support and model info."""
+    """Probe the verifier backend for logprobs support and model info.
+
+    #16: 此前用一次完整 compare 探测 logprobs——启动即计费。改为 1-token
+    max_tokens=1 探测（与 probe_model 一致，约 1-2 token），成本可忽略。
+    """
     _ = params
     _require_library()
-    
     try:
         client = _get_client()
-        # Make a minimal compare call to test logprobs
-        # Use a trivial problem to minimize cost
-        test_problem = "test"
-        candidate_a = "a"
-        candidate_b = "b"
-        criteria = {"Test": "test"}
-        
-        # Try to get the client's model info
         model = getattr(client, "model", None) or os.environ.get("OPENAI_MODEL", "unknown")
         base_url = getattr(client, "base_url", None) or os.environ.get("OPENAI_BASE_URL", "unknown")
-        
-        # Test logprobs with a minimal compare call
-        logprobs_supported = False
-        logprobs_error = None
-        try:
-            # Use minimal params to test logprobs
-            reward_a, reward_b = llm_verifier.compare(
-                test_problem, candidate_a, candidate_b,
-                criteria=criteria,
-                n_evaluations=1,
-                client=client
-            )
-            # If we get numeric rewards without error, logprobs likely worked —
-            # UNLESS both rewards are exactly 0.5, the signature of an
-            # on_error="tie" masked failure (the very pattern this repo's
-            # exact-flat guard exists for). R3-15: never report "supported"
-            # on a tie-shaped probe.
-            numeric = isinstance(reward_a, (int, float)) and isinstance(reward_b, (int, float))
-            tie_shaped = numeric and reward_a == 0.5 and reward_b == 0.5
-            logprobs_supported = numeric and not tie_shaped
-            if tie_shaped:
-                logprobs_error = "probe returned tie-shaped 0.5/0.5 (likely on_error='tie' masking a logprobs failure)"
-        except Exception as e:
-            logprobs_error = str(e)
-            # F7: fail-closed classification. Auth (401), quota (402),
-            # network and rate-limit failures used to fall into the "other
-            # error → assume logprobs might work" branch, green-lighting a
-            # broken backend. Only a successful numeric compare proves
-            # logprobs support; every exception reports unsupported so the
-            # host warns instead of silently scoring 0.5.
-            logprobs_supported = False
-        
+
+        if bridge_fix is not None:
+            r = bridge_fix.probe_model_v2(client, str(model))
+            return {
+                "model": r.get("model") or model,
+                "base_url": base_url,
+                "logprobs_supported": r.get("logprobs_supported") is True,
+                "logprobs_error": r.get("logprobs_error"),
+                "score_mode": r.get("score_mode"),
+                "llm_verifier_version": getattr(llm_verifier, "__version__", "unknown"),
+            }
         return {
             "model": model,
             "base_url": base_url,
-            "logprobs_supported": logprobs_supported,
-            "logprobs_error": logprobs_error,
+            "logprobs_supported": False,
+            "logprobs_error": "bridge_fix unavailable — probe_model_v2 not installed",
             "llm_verifier_version": getattr(llm_verifier, "__version__", "unknown"),
         }
     except Exception as e:

@@ -200,6 +200,10 @@ export function apply(ctx: Context, config: Config): void {
     escalation,
     maxConcurrentScoring: config.maxWorkers ?? 4,
     scoringGate,
+    // #11: 真实成本预算（此前是无效预留配置）
+    maxCostPerVerification: config.maxCostPerVerification,
+    costPer1kInputTokens: config.costPer1kInputTokens,
+    costPer1kOutputTokens: config.costPer1kOutputTokens,
   })
 
   // M4-B: /bestofn command (lazily when the commands registry is mounted)

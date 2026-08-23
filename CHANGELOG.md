@@ -31,6 +31,15 @@
 - majority 短路曾伪造 outlier 质量分（0.000 = 假陈述）——移除
 - VAL degraded 误标 L0（exact-flat 规则触发应为 L1）
 - persist 轮转对齐 agent-teams 完整原子写（错误码白名单 + 退避 + 直接写回退）
+- **decompose/evaluate_session 面板空白**（无 reward_a/b 也无 index+scores，卡片只显示徽章）→ 新增摘要行（🔬 轨迹步数/可疑行为/核查问题 · 📊 checkpoint/均分/趋势）
+- **Semaphore.acquire 死 API 删除**（零调用方）
+- **启动 probe 计费**：全 compare 改为 1-token 探测（成本可忽略）
+- **smoke 外部 Chrome 重复注入**：连接级标志防累积
+- **maxCostPerVerification 真实实现**：基于 history 真实耗时 × 费率估算，超预算拒绝（此前是无效预留配置）
+- **statusWait 轮询**：确认内存优先（运行中任务不读盘），注释文档化
+- **关键错误双语化**：probe 拒绝/成本拦截等常见错误附英文版
+- README action 数 9→11；panelLogic ACTION_LABELS 补 decompose/evaluate_session
+- RELEASING.md 新增发版前验证清单（#17）+ 同 commit 更新文档规则（#18）
 
 ## [0.5.0] - 2026-08-23
 

@@ -38,20 +38,6 @@ export class Semaphore {
     return { limit: this.limit, active: this.active, queued: this.queue.length }
   }
 
-  /** Acquire a slot; resolves with the release function. */
-  async acquire(): Promise<() => void> {
-    if (this.active < this.limit) {
-      this.active++
-      return () => this.release()
-    }
-    return new Promise<() => void>((resolve) => {
-      this.queue.push(() => {
-        this.active++
-        resolve(() => this.release())
-      })
-    })
-  }
-
   /**
    * Run `fn` under the semaphore. If `signal` aborts while queued, the
    * caller is dequeued and the signal reason is thrown (in-flight fn is NOT
