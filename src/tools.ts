@@ -438,12 +438,16 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   if (agreeing < Math.ceil(kUsed / 2)) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'unstable' })
+    const mcUnstable = literalMcNotes(k1.score_mode, marginBefore)
     return {
       signal: 'unstable',
       escalated: true,
       k_used: kUsed,
       message: '多次评估胜者不一致，信号不稳定，建议人工复核',
       ...(anyAnomaly ? { anomaly: 'reward_out_of_range', warning: anomalyWarning } : {}),
+      // 审查 #6: literal-mc 采样在临界分差下尤其不稳——如实标注路径与建议。
+      ...(mcUnstable.note ? { note: mcUnstable.note } : {}),
+      ...(mcUnstable.warning ? { warning: mcUnstable.warning } : {}),
       reps: reps.map((r) => ({ reward_a: r.reward_a, reward_b: r.reward_b })),
     }
   }
@@ -656,6 +660,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   if (escalated.index !== k1.index) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'unstable' })
+    const mcUnstable = literalMcNotes(k1.score_mode, marginBefore)
     return {
       signal: 'unstable',
       escalated: true,
@@ -663,6 +668,9 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       message: '两次评估第一名不一致，信号不稳定，建议人工复核',
       ...(k1.anomaly !== undefined ? { anomaly: k1.anomaly, warning: k1.warning } : {}),
       ...(escalated.anomaly !== undefined ? { anomaly: escalated.anomaly, warning: escalated.warning } : {}),
+      // 审查 #6: literal-mc 采样在临界分差下尤其不稳——如实标注路径与建议。
+      ...(mcUnstable.note ? { note: mcUnstable.note } : {}),
+      ...(mcUnstable.warning ? { warning: mcUnstable.warning } : {}),
       initial: { index: k1.index, scores: k1.scores },
       escalated_result: { index: escalated.index, scores: escalated.scores },
     }
@@ -966,6 +974,12 @@ interface VerifierToolArgs {
 }
 
 /** Render a tool result based on its shape (one tool serves many actions). */
+/** ⚠️ 前缀幂等：warning 已带 ⚠️ 时不再重复（#6 的 mc.warning 自带 ⚠️）。 */
+function warnText(w: unknown): string {
+  const s = typeof w === 'string' ? w : ''
+  return s.startsWith('⚠️') ? s : `⚠️ ${s}`
+}
+
 function renderResult(value: Record<string, unknown>): { type: 'text'; text: string } {
   let prefix = ''
   if (value.escalated === true && value.k_used !== undefined) {
@@ -991,7 +1005,7 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     const asyncHint = n !== null && n >= 8
       ? `\n💡 ${n} 候选锦标赛耗时较大，可改用 task_start 异步执行（select 中位 ~37.8s）`
       : ''
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n⚠️ ${value.warning}` : ''}${asyncHint}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n${warnText(value.warning)}` : ''}${asyncHint}` }
   }
   if (value.reward_a !== undefined) {
     const flags = [
@@ -1002,7 +1016,7 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
       typeof value.duration_ms === 'number' ? `⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : null,
       // F1: anomaly/warning must stay visible on ok/escalated results too —
       // a silently-clipped score must never render as a clean green result.
-      typeof value.warning === 'string' ? `⚠️ ${value.warning}` : null,
+      typeof value.warning === 'string' ? warnText(value.warning) : null,
     ].filter(Boolean).join(', ')
     return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${flags ? `\n[${flags}]` : ''}` }
   }
