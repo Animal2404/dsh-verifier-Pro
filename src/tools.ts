@@ -484,6 +484,36 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // F4: images in the key — same reason as compare (no TTL-window contamination).
   const baseKey = JSON.stringify({ type: 'select', problem: p.problem, candidates: p.candidates, criteria: p.criteria, model: p.model, n: p.n_evaluations ?? 1, pivots: p.pivots, seed: p.seed, images: p.images ?? null })
   const started = Date.now()
+
+  // uson1x majority-voting shortcut (deep-read engine.js:375-384): when a
+  // strict majority of candidates are byte-identical (post-sanitize), the
+  // tournament is redundant — the majority IS the winner. Saves a full PPT
+  // round on degenerate inputs (e.g. /bestofn with duplicate artifacts).
+  {
+    const counts = new Map<string, number>()
+    for (const c of p.candidates) counts.set(c, (counts.get(c) ?? 0) + 1)
+    let majorityText: string | undefined
+    let majorityCount = 0
+    for (const [text, n] of counts) {
+      if (n > majorityCount) { majorityText = text; majorityCount = n }
+    }
+    if (majorityText !== undefined && majorityCount > p.candidates.length / 2) {
+      const majorityIndex = p.candidates.indexOf(majorityText)
+      const majorityRewards = p.candidates.map((c) => (c === majorityText ? 1 : 0))
+      const composite = {
+        index: majorityIndex,
+        scores: majorityRewards,
+        ranking: [...majorityRewards.keys()].sort((a, b) => majorityRewards[b] - majorityRewards[a]),
+        escalated: false,
+        cached: false,
+        signal: 'flat' as const,
+        warning: `候选 ${majorityCount}/${p.candidates.length} 字节相同——按多数直接判胜（uson1x majority-voting 短路），未跑锦标赛`,
+      }
+      deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: majorityIndex, scores: majorityRewards, duration_ms: Date.now() - started, note: 'majority_shortcut' })
+      return composite
+    }
+  }
+
   // 官方 score cache（降本1，第二轮审计修正）：官方 cache_key = crit|task|索引|rep，
   // 不含 problem/候选内容/model —— 全局持久化会造成跨任务投毒（audit2 report-b 实证）。
   // 修正：cache 文件改为【每次调用独立临时文件】——只保留单次锦标赛内
@@ -884,7 +914,7 @@ export interface ToolsOptions {
 }
 
 interface VerifierToolArgs {
-  action: 'select' | 'compare' | 'track' | 'decompose' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
+  action: 'select' | 'compare' | 'track' | 'decompose' | 'evaluate_session' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
   problem?: string
   candidates?: string[]
   candidate_a?: string
@@ -983,7 +1013,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
       parameters: {
         action: {
           type: 'string',
-          enum: ['select', 'compare', 'track', 'decompose', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
+          enum: ['select', 'compare', 'track', 'decompose', 'evaluate_session', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
           required: true,
           description: 'What to do.',
         },
@@ -1135,6 +1165,46 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
             return asToolResult(result)
+          }
+          case 'evaluate_session': {
+            // lanbaolu /evaluate-session 移植（深读其 PROGRESS/ROADMAP，诚实适配）：
+            // 对一条会话轨迹做 track 评分并导出为结构化分数表（每步分数 + 总览 +
+            // JSONL 就绪串），供 RL 数据筛选 / 轨迹评估等复用——对应 lanbaolu P2
+            // 「轨迹评分与数据导出」目标。会话文件提取是 DSH 宿主的事，本工具接收
+            // 步骤数组（团队/调用方提供轨迹）。
+            if (!args.problem) throw new Error('verifier evaluate_session requires `problem`')
+            if (!args.steps?.length) throw new Error('verifier evaluate_session requires `steps`')
+            const esProblem = args.problem as string
+            const esSteps = args.steps as string[]
+            const esExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('track', {
+              problem: sanitizeForVerifier(esProblem),
+              steps: esSteps.map((s) => sanitizeForVerifier(s)),
+              ...(model ? { model } : {}),
+              ...(args.n_evaluations !== undefined ? { n_evaluations: boundParam(args.n_evaluations, MAX_N_EVALUATIONS) } : {}),
+            }, undefined, signal)
+            const raw = await (scoringGate ? scoringGate.run(esExec, signal) : esExec())
+            if (raw && Array.isArray(raw.scores)) {
+              const clamped = (raw.scores as unknown[]).map((v) => clamp01(v))
+              if (clamped.some((c) => c.clamped)) {
+                raw.anomaly = 'score_out_of_range'
+                raw.warning = `⚠️ track 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(raw.scores)}）`
+              }
+              raw.scores = clamped.map((c) => c.value)
+            }
+            // 结构化导出：每步分数表 + 趋势 + JSONL 就绪串（lanbaolu 导出格式）。
+            const scores = Array.isArray(raw.scores) ? raw.scores as number[] : []
+            const table = scores.map((s, i) => ({ step: i + 1, score: s }))
+            const trend = scores.length >= 2 ? Number((scores[scores.length - 1] - scores[0]).toFixed(4)) : 0
+            const exportable = {
+              problem: esProblem,
+              model,
+              scored_at: new Date().toISOString(),
+              steps: table,
+              trend,
+              summary: scores.length ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)) : 0,
+            }
+            store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: esProblem, model, scores, duration_ms: 0 })
+            return asToolResult({ ...raw, export: exportable, export_jsonl: JSON.stringify(exportable) })
           }
           case 'progress_start': {
             if (!args.problem) throw new Error('verifier progress_start requires `problem`')

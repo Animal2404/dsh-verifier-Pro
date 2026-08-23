@@ -89,12 +89,12 @@ export class VerifierStore {
 
   /**
    * Cap unbounded JSONL growth: after ROTATE_THRESHOLD appends, keep only the
-   * most recent ROTATE_KEEP lines. D-6: the R3-18 byte-precheck (256KB) was
-   * inconsistent with the 2000-line threshold — 2000 history lines usually
-   * stay under 256KB, so rotation silently never fired. A per-file append
-   * counter is O(1), line-accurate, and needs no stat/read on the hot path.
-   * Rewrite is atomic (tmp + rename) with 3 retries (Windows cross-process
-   * races, mirroring agent-teams state.js); residue tmp files are cleaned up.
+   * most recent ROTATE_KEEP lines. A per-file append counter is O(1) and
+   * line-accurate. Rewrite mirrors agent-teams state.js replaceFileAtomicOrDirect
+   * (deep-read 2026-08-23): atomic tmp+rename with up to 3 retries (50ms
+   * backoff) ONLY on retryable rename errors (EPERM/EACCES/EBUSY/EEXIST/
+   * ENOTEMPTY — Windows transient locks), then a content-equivalent direct
+   * write fallback; every path removes the temp file.
    */
   private rotateIfNeeded(file: string): void {
     try {
@@ -107,20 +107,36 @@ export class VerifierStore {
       const lines = readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim())
       if (lines.length <= ROTATE_THRESHOLD) return
       const kept = lines.slice(-ROTATE_KEEP)
+      const content = kept.join('\n') + '\n'
       const tmp = `${file}.rot-${process.pid}-${Date.now()}`
-      writeFileSync(tmp, kept.join('\n') + '\n', 'utf8')
+      writeFileSync(tmp, content, 'utf8')
+      // agent-teams: retryable rename codes (Windows transient lock shapes).
+      const retryable = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY'])
       let renamed = false
       for (let attempt = 0; attempt < 3 && !renamed; attempt++) {
         try {
           renameSync(tmp, file)
           renamed = true
-        } catch {
-          // Cross-process race: another worker rotated concurrently — retry.
+          break
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code
+          if (code && retryable.has(code)) {
+            // 50ms backoff: give the briefly-locking owner time to finish.
+            const until = Date.now() + 50
+            while (Date.now() < until) { /* busy-wait */ }
+            continue
+          }
+          break // non-retryable error: fall through to direct write
         }
       }
       if (!renamed) {
-        try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
+        // agent-teams degraded path: content-equivalent direct write, then
+        // remove the temp file either way.
+        try {
+          writeFileSync(file, content, 'utf8')
+        } catch { /* best-effort — original file untouched */ }
       }
+      try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
     } catch {
       // Rotation is best-effort; a failed rewrite must not lose the append.
     }
