@@ -42,7 +42,8 @@ jobs:
           # lib/ 不入库，CI 工作区是临时的——编译到 lib/ 让纯逻辑测试的
           # ../lib/* import 解析（这些模块只依赖 node 内置，零 harness）。
           # 注意：必须 `npx -p typescript@5.9` 钉包——裸 `npx tsc` 会拉到
-          # 废弃冒名包 tsc@2.0.4（曾致 CI 失败）。
+          # 废弃冒名包 tsc@2.0.4。@types/node 是纯类型包，无 peer 冲突。
+          npm install --no-save --no-audit --no-fund @types/node@24
           npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts \
             --outDir lib --module nodenext --moduleResolution nodenext \
             --target es2022 --skipLibCheck --esModuleInterop
