@@ -80,7 +80,7 @@ bash scripts/build.sh
 | `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
-> 📌 **模型评分路径（v0.6.0）**：
+> 📌 **模型评分路径（v0.6.1）**：
 > - **logprobs 路径（精确）**：`deepseek-v4-flash-vision-exp`（默认）、`qwen3.7-plus`、`qwen3.6-plus`。
 > - **literal-mc 路径（采样近似，模型不返回 logprobs 时的降级）**：`minimax-m3`、`minimax-m2.7`、
 >   `mimo-v2.5-pro`、`muse-spark-1.2-contributor`、`deepseek-v4-flash`（桥自动路由，见下）。
@@ -91,7 +91,7 @@ bash scripts/build.sh
 > literal-mc 路径的模型则要求能按提示词输出 `<score_X>` 字母标签（桥自动探测/按档案路由）。
 > 面板会标注本次评分用的是哪条路径；精细判别建议用 logprobs 模型。
 >
-> **默认模型判别力实测（v0.6.0，A/B 对照）**：默认的 `deepseek-v4-flash-vision-exp`
+> **默认模型判别力实测（v0.6.1，A/B 对照）**：默认的 `deepseek-v4-flash-vision-exp`
 > 与 `deepseek-v4-pro` 在粗判别（sumTo 循环 vs 公式）、细判别（fib 递归 vs 迭代，
 > 双方均正确）、中文判别（中文实现+中文 criteria）三个任务上**方向判定全部一致且正确**，
 > flash-vision-exp 的 margin 甚至更大（0.46/0.49/0.31 vs 0.35/0.41/0.21）。
@@ -192,7 +192,7 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxWorkers` | `4` | 桥内并发 worker |
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
-| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 已实现预算拦截**：基于 history 真实耗时×费率估算，超预算拒绝 |
+| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 起已实现预算拦截**（0.6.1 延续）：基于 history 真实耗时×费率估算，超预算拒绝 |
 | `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），预算拦截的费率输入 |
 | `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算（预留） |
 
@@ -305,7 +305,7 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 
 ```bash
 # 1) 安装（推荐钉扎）
-dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.6.0
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.6.1
 
 # 2) 检查环境（凭据 + .venv + 产物一次诊断）
 cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
