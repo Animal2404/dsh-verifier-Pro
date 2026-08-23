@@ -19,3 +19,7 @@ replacements.txt
 *.bak
 
 AUDIT-*.md
+
+# Python bytecode
+__pycache/
+*.pyc
