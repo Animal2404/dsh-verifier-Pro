@@ -166,11 +166,14 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
       ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
       : null)
   // 宿主的原始细节（更技术性）作为补充行；避免与统一模板重复。
-  const hostDetail = typeof data?.warning === 'string'
-    ? data.warning
-    : typeof data?.message === 'string'
-      ? data.message
-      : null
+  // majority 短路时 STATE_NOTES 已完整说明，跳过 raw warning 避免重复刷屏。
+  const hostDetail = signal === 'majority'
+    ? null
+    : typeof data?.warning === 'string'
+      ? data.warning
+      : typeof data?.message === 'string'
+        ? data.message
+        : null
   const isWarnStyle = stateKey === 'error' || stateKey === 'degraded' || stateKey === 'flat' || stateKey === 'unstable' || stateKey === 'majority'
 
   // 候选字母标：A/B/C/D…（超过 8 个回退数字）。
@@ -201,6 +204,13 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
               {letterAt(i)}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
             </span>
           ))}
+        </div>
+      )}
+
+      {/* majority 短路：无质量分（scores=null），但必须显示胜者是哪个候选 */}
+      {!running && signal === 'majority' && index !== null && (
+        <div style={styles.scores}>
+          <span style={styles.scoreTop}>🏆 多数胜者: {letterAt(index)}</span>
         </div>
       )}
 
