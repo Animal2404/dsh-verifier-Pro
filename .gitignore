@@ -21,7 +21,7 @@ replacements.txt
 AUDIT-*.md
 
 # Python bytecode
-__pycache/
+__pycache__/
 *.pyc
 
 pnpm-lock.yaml
