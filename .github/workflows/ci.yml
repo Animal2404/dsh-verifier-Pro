@@ -15,22 +15,47 @@ jobs:
         with:
           node-version: 22
 
-      # Lightweight smoke: the full host typecheck/tests need the DSH harness
-      # peer bundle (cordis + type augmentations across the monorepo), which
-      # is not installable from the public registry (dsh-client-ui-slots,
-      # dsh-compact etc. 404; peer augmentations live in the harness). CI
-      # therefore guards what runs WITHOUT the harness:
-      #   - python bridge + script syntax
-      #   - the evidence-chain / build_evidence regression (spawns node
-      #     scripts, only stdlib deps)
-      # The harness-dependent suite (npm test locally: f1/credentials/
-      # concurrency/bridge_fix) is the developer's local gate.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 诚实声明（锐评修正）：完整宿主测试（tools.ts/bestofn.ts）需要 DSH
+      # harness peer bundle（cordis + 跨包类型增强），无法从公共 registry 安装
+      # （dsh-scope/dsh-compact 404、增强在 monorepo 内）——这是环境限制。
+      # CI 现在验证的是【真测试】而非仅语法：
+      #   1. bridge_fix Python 套件 51 项离线检查（llm-verifier 在 PyPI 可装）——
+      #      literal-mc 路由器、reason-first 提示、响应形态检测、模型档案
+      #   2. 纯逻辑 TS 模块独立编译后测试（credentials/concurrency/persist
+      #      仅依赖 node 内置，零 harness）——凭据解析、信号量/LRU 原语
+      #   3. build_evidence 回归（stdlib 脚本）
+      #   4. 全部脚本语法 + Python 桥语法
+      - name: Python deps (llm-verifier for bridge_fix suite)
+        run: |
+          python -m pip install --quiet "llm-verifier>=0.2.0"
+
       - name: Python bridge syntax
         run: |
           python -m py_compile bridge/verifier_brain_bridge.py bridge/bridge_fix.py
-      - name: Node script syntax
+
+      - name: Compile harness-free TS modules standalone
+        run: |
+          # lib/ 不入库，CI 工作区是临时的——编译到 lib/ 让纯逻辑测试的
+          # ../lib/* import 解析（这些模块只依赖 node 内置，零 harness）。
+          npx --yes tsc src/credentials.ts src/concurrency.ts src/persist.ts \
+            --outDir lib --module nodenext --moduleResolution nodenext \
+            --target es2022 --skipLibCheck --esModuleInterop
+
+      - name: bridge_fix offline suite (51 checks, literal-mc path)
+        run: python tests/test_bridge_fix.py
+
+      - name: Pure-logic TS tests (credentials + concurrency)
+        run: |
+          node --test tests/credentials.test.mjs
+          node --test tests/concurrency.test.mjs
+
+      - name: build_evidence regression
+        run: node --test tests/build_evidence.test.mjs
+
+      - name: Script syntax check
         run: |
           for f in scripts/*.mjs; do node --check "$f"; done
-          for f in tests/*.test.mjs; do node --check "$f"; done
-      - name: build_evidence regression (no harness needed)
-        run: node --test tests/build_evidence.test.mjs
