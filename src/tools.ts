@@ -685,6 +685,10 @@ export function createEscalationRunner(deps: EscalationDeps) {
       // scoreable — admit them alongside true-logprobs models.
       const scoreMode = probe.score_mode
       if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
+        if (scoreMode === 'degraded') {
+          // 审查 #1：档案模型被观测到连续无 <score_X> 标签输出——fail-closed 拒绝。
+          throw new Error(`verifier 模型 ${modelParam} 已降级：${String(probe.logprobs_error ?? '连续评分未返回 score 标签')} [model ${modelParam} is DEGRADED — upstream format drift or stale profile; re-probe to recheck or use another model]`)
+        }
         throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型、literal-mc 模型，或去掉 model 参数。 [verifier cannot score with model ${modelParam}: ${String(probe.logprobs_error ?? 'no token-level logprobs from this backend')} — use a logprobs-capable or literal-mc model, or drop the model arg]`)
       }
     }
@@ -1066,6 +1070,10 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
           // also scoreable — admit them alongside true-logprobs models.
           const scoreMode = probe.score_mode
           if (!probe.ok || (probe.logprobs_supported !== true && scoreMode !== 'literal-mc')) {
+            if (scoreMode === 'degraded') {
+              // 审查 #1：档案模型被观测到连续无 <score_X> 标签输出——fail-closed 拒绝。
+              return { error: `verifier 模型 ${String(args.model)} 已降级：${String(probe.logprobs_error ?? '连续评分未返回 score 标签')} [model ${String(args.model)} is DEGRADED — upstream format drift or stale profile; re-probe to recheck or use another model]` }
+            }
             return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型）、literal-mc 模型，或去掉 model 参数。 [verifier cannot score with model ${String(args.model)}: ${String(probe.logprobs_error ?? 'no token-level logprobs')} — use a logprobs-capable or literal-mc model, or drop the model arg]` }
           }
         }

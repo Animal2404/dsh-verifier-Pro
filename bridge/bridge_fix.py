@@ -125,6 +125,57 @@ _KNOWN_LOGPROBS_MODELS = {
 _TRUSTED_NO_LOGPROBS = set(MODEL_PROFILES.keys())
 
 
+# ---------------------------------------------------------------------------
+# Profile self-healing (审查 #1): passive score-tag observation + fail-closed
+# ---------------------------------------------------------------------------
+# MODEL_PROFILES is baked at ship time. If upstream changes a model's behavior
+# (tags stop being emitted, format drift), literal-mc scoring would silently
+# degrade. Every literal-mc reply is observed for <score_X> tags: N consecutive
+# tag-less replies mark the model DEGRADED; probe_model_v2 then reports
+# ok=false so the TS gate refuses scoring (never silently wrong scores). One
+# tagged reply clears the streak (self-heal). Degraded models get a live
+# tag-emission recheck in probe so recovery is automatic.
+
+MAX_TAG_FAILURES = 3
+
+_TAG_FAILURES: dict[str, int] = {}
+_DEGRADED_MODELS: set[str] = set()
+_STATE_LOCK = threading.Lock()
+
+
+def _observe_score_tags(model: str, text: str) -> None:
+    """Called after every literal-mc scoring reply. Tag present -> clear the
+    streak; missing -> increment; >= MAX_TAG_FAILURES -> mark degraded."""
+    if not model:
+        return
+    has_tag = "<score" in (text or "").lower()
+    with _STATE_LOCK:
+        if has_tag:
+            _TAG_FAILURES.pop(model, None)
+            _DEGRADED_MODELS.discard(model)
+            return
+        n = _TAG_FAILURES.get(model, 0) + 1
+        _TAG_FAILURES[model] = n
+        if n >= MAX_TAG_FAILURES:
+            _DEGRADED_MODELS.add(model)
+
+
+def is_degraded(model: str) -> bool:
+    """True when `model` (or a substring key it contains) is in the degraded set."""
+    lowered = (model or "").lower()
+    with _STATE_LOCK:
+        for key in _DEGRADED_MODELS:
+            if key in lowered:
+                return True
+        return False
+
+
+def _clear_degraded(model: str) -> None:
+    with _STATE_LOCK:
+        _DEGRADED_MODELS.discard(model)
+        _TAG_FAILURES.pop(model, None)
+
+
 def profile_for(model: str) -> dict[str, Any] | None:
     """Profile for a model id (case-insensitive substring match)."""
     lowered = (model or "").lower()
@@ -148,7 +199,7 @@ def logprobs_supported(model: str) -> bool:
 
 
 def score_mode_for(model: str) -> str:
-    """'logprobs' | 'literal-mc' | 'unknown'."""
+    """'logprobs' | 'literal-mc' | 'degraded' | 'unknown'."""
     lowered = (model or "").lower()
     if lowered in _KNOWN_LOGPROBS_MODELS:
         return "logprobs"
@@ -156,7 +207,9 @@ def score_mode_for(model: str) -> str:
     if p is None:
         return "unknown"
     if p.get("logprobs") == "absent-ok":
-        return "literal-mc"
+        # 审查 #1：档案模型若已被观测到连续无标签输出，进入 degraded 状态——
+        # 评分走 fail-closed（TS 门禁拒绝），不再静默按旧档案出分。
+        return "degraded" if is_degraded(model) else "literal-mc"
     return "logprobs"
 
 
@@ -170,7 +223,8 @@ def mc_n_evaluations_for(model: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = None,
-                     images: Any = None, top_logprobs: int = 0) -> tuple[str, None, None]:
+                     images: Any = None, top_logprobs: int = 0,
+                     _observe: bool = True) -> tuple[str, None, None]:
     """One plain chat completion WITHOUT the logprobs key.
 
     Returns (text, None, None) so the official `extract_score` uses its
@@ -181,6 +235,10 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
     repetitive/refusal) into a thread-local so the bridge handler can surface
     it as an anomaly — the score numbers alone cannot see a truncated or
     loop-repeating model output.
+    _observe=True (default): feeds the reply into the profile self-healing
+    counter (审查 #1) — tag-less replies accumulate toward degraded state.
+    Probe calls pass _observe=False so a failed probe is not misread as a
+    scoring-format regression.
     """
     from llm_verifier import fine_grained_reward as fgr
 
@@ -213,6 +271,9 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
     # CompassVerifier C-class response-shape detection (mechanical):
     # incomplete (finish_reason=length) / repetitive (n-gram loop) / refusal.
     _RESPONSE_SHAPE.value = detect_response_shape(text, finish)
+    if _observe:
+        # 审查 #1：评分响应观测——无 <score_X> 标签会累积到降级状态。
+        _observe_score_tags(model, text)
     return text, None, None
 
 
@@ -302,6 +363,12 @@ def _make_router(previous):
         if mode == "literal-mc":
             return call_no_logprobs(client, prompt, str(model),
                                     images=images, top_logprobs=top_logprobs)
+        if mode == "degraded":
+            # 审查 #1 fail-closed：不再按旧档案静默评分。
+            raise RuntimeError(
+                f"model {model} is DEGRADED: {MAX_TAG_FAILURES} consecutive scoring "
+                "replies without <score_X> tags — upstream output format drift or "
+                "stale profile. Use a logprobs-capable model, or re-probe to recheck.")
         return previous(client, prompt, model=model, top_logprobs=top_logprobs,
                         images=images)
 
@@ -381,6 +448,25 @@ def probe_model_v2(client, model: str) -> dict[str, Any]:
             result["ok"] = True
             result["logprobs_supported"] = True
             result["score_mode"] = "logprobs"
+            return result
+        if mode == "degraded":
+            # 审查 #1：降级模型做 live 标签复核——恢复则清除降级回到 literal-mc，
+            # 复核仍无标签则明确报错（ok=false → TS 门禁拒绝评分，fail-closed）。
+            emission = _probe_tag_emission(client, resolved, model)
+            result["tag_emission"] = emission
+            if emission and emission.get("score_A") and emission.get("score_B"):
+                _clear_degraded(model)
+                result["ok"] = True
+                result["logprobs_supported"] = False
+                result["score_mode"] = "literal-mc"
+                result["logprobs_error"] = (
+                    "recovered: score-tag emission verified live after degradation")
+                return result
+            result["score_mode"] = "degraded"
+            result["logprobs_error"] = (
+                f"model {model} is DEGRADED: {MAX_TAG_FAILURES} consecutive scoring "
+                "replies without <score_X> tags and live recheck failed — upstream "
+                "format drift or stale profile. Use a logprobs-capable model.")
             return result
         # trusted literal-mc profile
         verify = os.environ.get("VERIFIER_BRAIN_VERIFY_TAGS", "").strip().lower()

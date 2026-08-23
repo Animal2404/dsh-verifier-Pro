@@ -256,6 +256,37 @@ def test_response_shape():
     check("normal response no flag", r is None, str(r))
 
 
+def test_profile_self_heal():
+    print("[profile self-healing (审查 #1)]")
+    model = "minimax-m3"
+    try:
+        # 干净起点
+        check("fresh: not degraded", not bridge_fix.is_degraded(model))
+        check("fresh: score_mode == literal-mc",
+              bridge_fix.score_mode_for(model) == "literal-mc",
+              str(bridge_fix.score_mode_for(model)))
+        # 连续无标签观测 → 累积降级
+        for i in range(bridge_fix.MAX_TAG_FAILURES):
+            bridge_fix._observe_score_tags(model, "some reply without any score tags")
+        check("degraded after N tag-less replies", bridge_fix.is_degraded(model))
+        check("score_mode == degraded after accumulation",
+              bridge_fix.score_mode_for(model) == "degraded",
+              str(bridge_fix.score_mode_for(model)))
+        # 一次带标签观测 → 自愈恢复
+        bridge_fix._observe_score_tags(model, "the answer <score_A> A </score_A>")
+        check("recovered after one tagged reply", not bridge_fix.is_degraded(model))
+        check("score_mode back to literal-mc after recovery",
+              bridge_fix.score_mode_for(model) == "literal-mc",
+              str(bridge_fix.score_mode_for(model)))
+        # 无标签观测不影响非档案模型 / 控制组
+        bridge_fix._observe_score_tags("deepseek-v4-pro", "no tags here")
+        check("logprobs model never degraded",
+              bridge_fix.score_mode_for("deepseek-v4-pro") == "logprobs")
+    finally:
+        bridge_fix._clear_degraded(model)
+        bridge_fix._clear_degraded("deepseek-v4-pro")
+
+
 def main():
     print("=== bridge_fix offline tests ===")
     test_profiles()
@@ -263,6 +294,7 @@ def main():
     test_router_dispatch()
     test_reason_first()
     test_response_shape()
+    test_profile_self_heal()
     print(f"\noffline: {PASS} passed, {FAIL} failed")
     if "--live" in sys.argv:
         live_test()
