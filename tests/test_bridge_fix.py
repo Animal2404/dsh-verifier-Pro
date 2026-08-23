@@ -256,6 +256,40 @@ def test_response_shape():
     check("normal response no flag", r is None, str(r))
 
 
+def test_repair_truncated_json():
+    print("[decompose JSON truncation repair (审查 #3)]")
+    import verifier_brain_bridge as vb  # noqa: F401 (module-level import at top)
+
+    def _valid(s):
+        try:
+            json.loads(s)
+            return True
+        except Exception:
+            return False
+
+    # 对象嵌套截断（最常见）—— 修复后必须是合法 JSON 且与期望一致
+    cases = [
+        ('{"a": 1, "b": {"c": 2', '{"a": 1, "b": {"c": 2}}'),
+        ('{"step_summary": [], "potential_errors": [{"behavior": "x", "error": "y"}], "check_questions": [{"q": "z"}',
+         '{"step_summary": [], "potential_errors": [{"behavior": "x", "error": "y"}], "check_questions": [{"q": "z"}]}'),
+        # 引号内的 } 不应计数
+        ('{"s": "text with } brace"', '{"s": "text with } brace"}'),
+        ('{"s": "escaped \\" quote", "x": 1', '{"s": "escaped \\" quote", "x": 1}'),
+    ]
+    for raw, expected in cases:
+        got = vb._repair_truncated_json(raw)
+        check(f"repair {raw[:34]!r}",
+              got == expected and _valid(got),
+              repr(got))
+    # 数组中间截断：尽力而为（修复后应尽量合法，但不保证精确）
+    arr = '{"step_summary": [{"step": 1'
+    got = vb._repair_truncated_json(arr)
+    check("repair array-truncation best-effort valid", _valid(got), repr(got))
+    # 完整 JSON 不应被破坏
+    full = '{"a": [1, 2, {"b": 3}]}'
+    check("repair intact JSON unchanged", vb._repair_truncated_json(full) == full)
+
+
 def test_profile_self_heal():
     print("[profile self-healing (审查 #1)]")
     model = "minimax-m3"
@@ -295,6 +329,7 @@ def main():
     test_reason_first()
     test_response_shape()
     test_profile_self_heal()
+    test_repair_truncated_json()
     print(f"\noffline: {PASS} passed, {FAIL} failed")
     if "--live" in sys.argv:
         live_test()

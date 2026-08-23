@@ -454,6 +454,37 @@ Steps:
 """
 
 
+def _repair_truncated_json(raw: str) -> str:
+    """审查 #3：按括号栈补全被截断的 JSON。
+
+    扫描字符串（感知引号/转义），用栈记录未闭合的 `{[`，按 LIFO 补对应的
+    闭括号（`[`→`]`，`{`→`}`）。对「对象/数组嵌套截断在完整值之后」的
+    常见截断点可靠；截断在数组元素中间时尽力而为（补出的 JSON 可能仍
+    非法，调用方会退回原始片段）。用于 decompose 在 finish_reason=length
+    下的部分修复。
+    """
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in raw:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]" and stack:
+            stack.pop()
+    closes = ("]" if op == "[" else "}" for op in reversed(stack))
+    return raw + "".join(closes)
+
+
 def _handle_decompose(params: dict[str, Any]) -> dict[str, Any]:
     """DeepVerifier-style rubric decomposition of a trajectory (③).
 
@@ -478,15 +509,25 @@ def _handle_decompose(params: dict[str, Any]) -> dict[str, Any]:
     prompt = _DECOMPOSE_PROMPT.format(errors=_DEEPVERIFIER_ERRORS, task=problem, steps=steps_text)
 
     # No logprobs needed — decomposition is a structural analysis, not scoring.
+    # 审查 #3：显式禁用 thinking —— 评分路径（call_no_logprobs）同样带
+    # {"thinking": {"type": "disabled"}}。decompose 是结构分析，不需要模型推理；
+    # 开着推理会吃掉 max_tokens 预算，中文长 JSON 输出偶发被截断
+    # （finish_reason=length）或整段空响应（raw=""）。
     body = dict(
         model=resolved,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=4096,
+        max_tokens=8192,
         temperature=0.0,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     response = client.chat.completions.create(**body)
     text = response.choices[0].message.content or ""
     finish = getattr(response.choices[0], "finish_reason", None)
+    if not text.strip():
+        # 隐藏推理/空输出 → 一次重试（同 call_no_logprobs 的 muse-spark 模式）
+        response = client.chat.completions.create(**body)
+        text = response.choices[0].message.content or ""
+        finish = getattr(response.choices[0], "finish_reason", None)
 
     # Parse the JSON object out of the reply (tolerate ```json fences / stray text).
     m = re.search(r"\{[\s\S]*\}", text)
@@ -497,9 +538,10 @@ def _handle_decompose(params: dict[str, Any]) -> dict[str, Any]:
         parsed = json.loads(raw_json)
     except Exception as exc:
         # Truncated JSON (finish_reason=length) — attempt partial repair:
-        # close the outermost object and retry once; else surface the fragment.
+        # close unbalanced brackets (more reliable than appending "}"*3),
+        # then retry once; else surface the fragment.
         if finish == "length":
-            repaired = raw_json + "}" * 3
+            repaired = _repair_truncated_json(raw_json)
             try:
                 parsed = json.loads(repaired)
             except Exception:
