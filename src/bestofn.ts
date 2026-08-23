@@ -167,9 +167,9 @@ export function buildBestOfNActivation(goal: string, n: number): string {
     'Run the full loop:',
     '1. agent_teams: create team, add N members, assign each the SAME task (complete implementation).',
     '2. Collect N artifacts (each member saves its deliverable to a path).',
-    '3. Evidence chain per artifact: `node "' + join(pluginRoot, 'scripts', 'evidence_chain.mjs') + '" <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot.',
-    '4. Survivor evidence blocks -> verifier select (adaptive K handles close margins).',
-    '5. Integrate: hand ALL survivors + scores to an integrator agent to merge the best parts -> merge smoke -> verifier compare(merged, champion) gate.',
+    '3. Evidence chain per artifact: `node "' + join(pluginRoot, 'scripts', 'evidence_chain.mjs') + '" <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot; a candidate with NO smoke record (unknown) is also excluded from ranking — never assume it survived.',
+    '4. Survivor evidence blocks -> verifier select (adaptive K handles close margins; flat results carry no ranking signal — confirm the top two with compare). If the confirming compare is also within the noise band, there is NO reliable champion: do not invent one, merge ALL survivors instead.',
+    '5. Integrate: hand ALL survivors + scores to an integrator agent to merge the best parts -> merge smoke -> verifier compare(merged, champion-or-nominal-best) gate.',
     '6. Deliver the final result + the full score report (never fabricate or round away scores).',
   ].join('\n')
 }

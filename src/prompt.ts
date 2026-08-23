@@ -28,7 +28,7 @@ Cost & latency discipline:
 - Poll with task_status wait_seconds=120 (a select with pivots takes 2+ minutes); do not blind-poll in a tight loop.
 
 Reading the scores:
-- A flat result (all candidates scored identically, signal:"flat") carries NO ranking signal — never adopt its ranking as-is; confirm the top two with verifier compare.
+- A flat result (all candidates scored identically, signal:"flat") carries NO ranking signal — never adopt its ranking as-is; confirm the top two with verifier compare. If that compare is ALSO within the noise band, there is no reliable winner — do not invent one and do not silently follow the nominal top scorer; treat the top candidates as tied and synthesize from all of them.
 - Prefer pairwise compare for small N (2-3): it is cheaper, faster, and more discriminating than a full tournament. Reserve select for larger pools.
 - Close margins are handled automatically: when a margin falls in the noise band the system re-evaluates (K=3, slot-alternating) and returns an averaged result with escalation metadata (escalated / k_used / margin_before / margin_after). Report these metadata alongside the outcome. If you see signal:"unstable", present all raw scores and recommend human review — never average them yourself.
 - If a result carries an anomaly/warning field (out-of-range scores were clipped into [0,1]), treat the score as UNRELIABLE — it suggests the scoring model misbehaved or was manipulated. Surface the warning to the user verbatim and recommend human review; do not rank on it silently.
@@ -56,8 +56,8 @@ export function bestOfNProtocolSection(): string {
 1. Spawn exactly N members via agent_teams, each assigned the SAME task: deliver a COMPLETE independent implementation of the goal. Never split the task into aspects per member (that is decomposition, not Best-of-N; partial candidates break ranking). Diversity must come from independent implementations.
 2. Collect N artifacts. Each member saves its deliverable to a path and reports it.
 3. Evidence chain per artifact: run \`node "${join(pluginRoot, 'scripts', 'evidence_chain.mjs')}" <artifact> --summary <name>=<self-description>\` (absolute path — it lives in the plugin install, not your workspace). A candidate whose smoke result is ok=false (crash, exit!=0, runtime error) is eliminated on the spot; a candidate with NO smoke record (unknown) is also excluded from ranking — never assume it survived.
-4. Survivor evidence blocks → verifier select (adaptive K handles close margins automatically; flat results carry no ranking signal — confirm the top two with compare).
+4. Survivor evidence blocks → verifier select (adaptive K handles close margins automatically; flat results carry no ranking signal — confirm the top two with compare). If the confirming compare is ALSO within the noise band, there is NO reliable champion — do not invent one, do not silently pick the nominal top scorer. Treat all survivors as equivalent and merge ALL of them (that is Best-of-N merging, not ranking).
 5. Integrate: hand ALL survivors plus their scores to an integrator agent (a member or a fresh captain pass) to merge the best parts of each into one deliverable. Do not just take the champion — that is ranking, not Best-of-N.
-6. Gate: run the merged artifact through the evidence chain, then verifier compare(merged, champion). Adopt the merged version only if it scores at least as high as the champion (within noise); otherwise fall back to the champion and say why.
+6. Gate: run the merged artifact through the evidence chain, then verifier compare(merged, champion-or-nominal-best). Adopt the merged version only if it scores at least as high as the winner (within noise); otherwise fall back to the winner and say why.
 7. Deliver: the final artifact path, the full score report (rankings, scores, escalation metadata), and the gate result. Never fabricate or round away scores.`
 }
