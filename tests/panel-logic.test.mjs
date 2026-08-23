@@ -19,7 +19,8 @@ const block = (data, extra = {}) => ({
   ...extra,
 })
 
-const deriveOf = (data) => derive(extract('verifier', block(data)), 'compare')
+// 用 data.action 作为面板 action（真实面板：extract 从 meta/call args 提取 action）
+const deriveOf = (data) => derive(extract('verifier', block(data)), data.action ?? 'compare')
 
 test('ok：正常分数 → 徽章「正常」+ VAL L0', () => {
   const p = deriveOf({ action: 'compare', reward_a: 0.7, reward_b: 0.3, score_mode: 'logprobs' })
@@ -85,4 +86,31 @@ test('extract：meta 通道优先于文本，异常 block 不抛', () => {
   // 文本 JSON 回退
   const viaText = extract('verifier', { kind: 'tool-call', call: { argsRaw: '{"action":"compare"}' }, content: [{ type: 'text', text: '{"reward_a":0.9,"reward_b":0.1}' }] })
   assert.equal(viaText.data?.reward_a, 0.9)
+})
+
+test('decompose：结构化诊断显示摘要行（不再空白）', () => {
+  const p = deriveOf({
+    action: 'decompose',
+    step_summary: [{ step: 1 }, { step: 2 }, { step: 3 }],
+    potential_errors: [{ behavior: 'x', error: 'y' }],
+    check_questions: [{ question: 'q1' }, { question: 'q2' }],
+  })
+  assert.equal(p.stateKey, 'ok')
+  assert.ok(p.summaryLine, 'decompose 必须有摘要行')
+  assert.match(p.summaryLine ?? '', /3 步/, '含步数')
+  assert.match(p.summaryLine ?? '', /1 个/, '含可疑行为数')
+  assert.match(p.summaryLine ?? '', /2 个/, '含核查问题数')
+})
+
+test('evaluate_session：评分导出显示 checkpoint/均分/趋势（不再空白）', () => {
+  const p = deriveOf({
+    action: 'evaluate_session',
+    scores: [0.3, 0.6, 0.9],
+    export: { checkpoints: [{ checkpoint: 1, score: 0.3 }, { checkpoint: 2, score: 0.6 }, { checkpoint: 3, score: 0.9 }], trend: 0.6, summary: 0.6 },
+  })
+  assert.equal(p.stateKey, 'ok')
+  assert.ok(p.summaryLine, 'evaluate_session 必须有摘要行')
+  assert.match(p.summaryLine ?? '', /3 个/, '含 checkpoint 数')
+  assert.match(p.summaryLine ?? '', /0\.6/, '含均分')
+  assert.match(p.summaryLine ?? '', /\+0\.6/, '含趋势')
 })

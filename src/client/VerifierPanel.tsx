@@ -107,7 +107,7 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
   const { action, data, running, isError } = extracted
   // GUI 状态推导全部委托给纯逻辑模块（panelLogic）——可测试、与渲染解耦。
   const panel = React.useMemo(() => derivePanelState(extracted, action), [extracted, action])
-  const { stateKey, badgeText, isWarn, valNote, mcNote, noticeText, hostDetail } = panel
+  const { stateKey, badgeText, isWarn, valNote, mcNote, noticeText, hostDetail, summaryLine } = panel
 
   const index = typeof data?.index === 'number' ? data.index : null
   const scores = Array.isArray(data?.scores) ? (data.scores as number[]) : null
@@ -165,6 +165,11 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && mcNote && (
         <div style={styles.noticeDetail}>{mcNote}</div>
+      )}
+
+      {/* 结构化 action 摘要（decompose/evaluate_session）——之前这些卡片是空白的 */}
+      {!running && !isError && summaryLine && (
+        <div style={styles.scores}><span style={styles.scoreTop}>{summaryLine}</span></div>
       )}
 
       {!running && !isError && valNote && (

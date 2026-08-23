@@ -69,6 +69,8 @@ export interface PanelState {
   noticeText: string | null
   /** 宿主原始细节行（无则 null）。 */
   hostDetail: string | null
+  /** 结构化 action（decompose/evaluate_session）的摘要行（无则 null）。 */
+  summaryLine: string | null
   /** 展开 JSON 的原始数据（供测试断言）。 */
   data: Record<string, unknown> | null
 }
@@ -132,5 +134,23 @@ export function derivePanelState(
       ? data.message
       : null
 
-  return { stateKey, badgeText, isWarn, valLevel, valNote, mcNote, noticeText, hostDetail, data }
+  // 结构化 action 摘要行：decompose（诊断）与 evaluate_session（评分导出）
+  // 不产生 reward_a/b，面板应显示其结构化结果而非空白。
+  let summaryLine: string | null = null
+  if (data && !running && !isError) {
+    if (action === 'decompose') {
+      const errs = Array.isArray(data.potential_errors) ? data.potential_errors.length : 0
+      const qs = Array.isArray(data.check_questions) ? data.check_questions.length : 0
+      const steps = Array.isArray(data.step_summary) ? data.step_summary.length : 0
+      summaryLine = `🔬 轨迹 ${steps} 步 · 可疑行为 ${errs} 个 · 核查问题 ${qs} 个（展开查看详情）`
+    } else if (action === 'evaluate_session') {
+      const exp = data.export as Record<string, unknown> | undefined
+      const cps = Array.isArray(exp?.checkpoints) ? exp.checkpoints.length : 0
+      const trend = typeof exp?.trend === 'number' ? exp.trend : null
+      const mean = typeof exp?.summary === 'number' ? exp.summary : null
+      summaryLine = `📊 checkpoint ${cps} 个${mean !== null ? ` · 均分 ${mean.toFixed(3)}` : ''}${trend !== null ? ` · 趋势 ${trend >= 0 ? '+' : ''}${trend.toFixed(3)}` : ''}`
+    }
+  }
+
+  return { stateKey, badgeText, isWarn, valLevel, valNote, mcNote, noticeText, hostDetail, summaryLine, data }
 }
