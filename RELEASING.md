@@ -19,12 +19,34 @@ gh release edit v0.5.0 --title "v0.5.0 — <一句话概括>"
 ## 发布流程
 
 1. `npm run verify`（typecheck + 全量测试）全绿
-2. 确认 CHANGELOG.md 有本版条目
-3. `npm pack` 构建 tgz，检查产物：
+2. **确认 CI 绿**：推当前 HEAD 触发 CI，等 `gh run list --limit 1` 显示 success（core/bridge/harness 三 job 全绿才算绿）。**CI 红 = 不发版**
+3. **版本号三处一致**：`package.json` version / `CHANGELOG.md` 最新条目 / git tag 必须一致；CHANGELOG 对照 `git log v上一版..HEAD --oneline` 逐条核对不遗漏
+4. `npm pack` 构建 tgz，检查产物：
    - `tar -tzf *.tgz | grep bridge_fix` —— bridge_fix.py 必须在包内
    - `tar -tzf *.tgz | grep pycache` —— 必须为空（`!bridge/__pycache__` 已在 files 排除）
-4. `git push origin main` + `git tag vX.Y.Z` + `git push origin vX.Y.Z`
-5. 发 Release（标题用上面的格式）
+   - `tar -tzf *.tgz | grep -E "lib/(index|tools)\.js"` —— host lib 产物在包内
+   - `tar -tzf *.tgz | grep cordis.patch.yml` —— 配置在包内
+   - `tar -tzf *.tgz | grep node_modules` —— 必须为空
+5. `git push origin main` + `git tag vX.Y.Z` + `git push origin vX.Y.Z`
+6. 发 Release（标题用上面的格式），随后 `gh release edit vX.Y.Z --title "vX.Y.Z — <概括>"`
+7. **发布后验证**：`gh release view vX.Y.Z --json name,tagName,assets` 复核标题格式、tag、tgz 资产在位
+
+## Release notes 结构（推荐）
+
+按分组写，如实不夸大：
+
+```
+## vX.Y.Z — <一句话概括>
+### Added / ### Fixed（含根因）/ ### Changed / ### Removed（含为什么）
+### 工程（CI/测试/文档）/ ### 已知限制（如实）
+```
+
+## stable 分支策略
+
+- `stable/<major>.<minor>.x`（如 `stable/0.5.x`）从已发布 tag 创建，代表「可依赖的稳定线」
+- 发新版本后：稳定线升级时可开新 stable 分支；旧 stable 保留（仅安全修复）
+- **安全/正确性修复 cherry-pick 到当前 stable 分支**；新功能不进
+- 忘记维护 stable 不阻塞推送，但 notes 应说明当前 stable 线
 
 ## 发布前文档对账
 
