@@ -5,12 +5,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createEscalationRunner } from '../lib/tools.js'
 
-/** Fake bridge: scripted responses + request log. */
+/** Fake bridge: scripted responses + request log. probe_model always passes
+ * (the runner's D-1x per-model preflight must not consume scripted responses). */
 function fakeBridge(script) {
   const calls = []
   return {
     calls,
     async request(method, params) {
+      if (method === 'probe_model') return { ok: true, logprobs_supported: true }
       calls.push({ method, model: params.model, params })
       const next = script.shift()
       if (!next) throw new Error('unexpected extra bridge call: ' + method)

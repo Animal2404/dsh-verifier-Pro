@@ -432,6 +432,55 @@ def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _handle_probe_model(params: dict[str, Any]) -> dict[str, Any]:
+    """Cheap per-model logprobs capability check (~1-2 tokens).
+
+    ``call_deepseek`` burns the full 32K max_tokens budget when a model
+    either thinks the whole budget away or does not return token-level
+    logprobs — and the failure only surfaces AFTER all that spend (the
+    fail-closed raise). This handler answers the same question with a
+    max_tokens=1 completion: if the model returns logprobs.content, it can
+    be scored with; otherwise fail fast with a clear message instead of
+    burning 32K tokens. D-1x: mirrors the official package's own
+    prefilled-position trick (fine_grained_reward.py max_tokens=1).
+    """
+    _require_library()
+    model = str(params.get("model") or "").strip()
+    if not model:
+        return {"ok": False, "error": "probe_model requires `model`"}
+    try:
+        client = _get_client()
+        from llm_verifier import fine_grained_reward as fgr
+        resolved = fgr.resolve_model(client, model)
+        response = client.chat.completions.create(
+            model=resolved,
+            messages=[{"role": "user", "content": "t"}],
+            max_tokens=1,
+            temperature=1.0,
+            logprobs=True,
+            top_logprobs=2,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        choice = response.choices[0]
+        ok = bool(choice.logprobs and choice.logprobs.content)
+        return {
+            "ok": ok,
+            "model": resolved,
+            "logprobs_supported": ok,
+            "logprobs_error": None if ok else (
+                f"model {model!r} returned no token-level logprobs "
+                f"(finish_reason={choice.finish_reason!r}) — verifier cannot score with it"
+            ),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "model": model,
+            "logprobs_supported": False,
+            "logprobs_error": f"probe_model failed: {str(e)}",
+        }
+
+
 _HANDLERS: dict[str, Any] = {
     "ping": _handle_ping,
     "select": _handle_select,
@@ -442,6 +491,7 @@ _HANDLERS: dict[str, Any] = {
     "progress_close": _handle_progress_close,
     "usage": _handle_usage,
     "probe": _handle_probe,
+    "probe_model": _handle_probe_model,
 }
 
 

@@ -619,6 +619,17 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
 /** Async-task runner: routes select/compare through adaptive escalation. */
 export function createEscalationRunner(deps: EscalationDeps) {
   return async (method: string, params: Record<string, unknown>): Promise<unknown> => {
+    // D-1x: cheap per-model preflight for async/service paths too — a model
+    // without token-level logprobs used to burn the full 32K budget here.
+    const modelParam = typeof params.model === 'string' ? params.model : undefined
+    if (modelParam) {
+      const probe = await (await deps.getBridge()).request<{ ok: boolean; logprobs_supported: boolean; logprobs_error?: string | null }>(
+        'probe_model', { model: modelParam }, 30_000,
+      )
+      if (!probe.ok || probe.logprobs_supported !== true) {
+        throw new Error(`verifier 无法用模型 ${modelParam} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型或去掉 model 参数。`)
+      }
+    }
     if (method === 'compare') {
       return runCompare(deps, {
         problem: String(params.problem ?? ''),
@@ -956,6 +967,19 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         const bridge = await getBridge()
         const model = withDefaultModel(args.model)
         const signal = context?.signal
+        // D-1x: cheap per-model logprobs preflight. A non-default model that
+        // cannot return token-level logprobs used to burn the FULL 32K
+        // max_tokens budget before the bridge raised "no answer logprobs".
+        // probe_model answers in ~1-2 tokens — fail fast with a clear error
+        // instead of paying for 32K of wasted reasoning.
+        if (model && args.model && model !== defaultModel) {
+          const probe = await bridge.request<{ ok: boolean; logprobs_supported: boolean; logprobs_error?: string | null }>(
+            'probe_model', { model: args.model }, 30_000, signal,
+          )
+          if (!probe.ok || probe.logprobs_supported !== true) {
+            return { error: `verifier 无法用模型 ${String(args.model)} 评分：${String(probe.logprobs_error ?? '该模型在此后端不返回 token 级 logprobs')}。请使用支持 logprobs 的模型（如配置的默认模型），或去掉 model 参数。` }
+          }
+        }
         switch (args.action) {
           case 'select': {
             if (!args.problem) throw new Error('verifier select requires `problem`')
