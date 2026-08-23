@@ -95,14 +95,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install DSH bundle via pnpm (populates .pnpm peer store)
+      - name: Install host runtime peers (pnpm — npm ERESOLVE-proof)
         run: |
           npm install -g pnpm@9
-          # 会写 package.json（CI 临时工作区，无害）；--ignore-workspace 防误判
-          pnpm add --ignore-workspace @deepseek-ai/dsh 2>&1 | tail -3
-
-      - name: Hoist harness peers from .pnpm store
-        run: node scripts/link_pnpm_peers.mjs
+          # 审查 #2 排查结论：DSH 宿主 peer 里只有 3 个是 host 运行时真正需要的，
+          # 且它们全部在公共 registry（dsh-tools 必须钉 0.1.1-rc.2 —— 0.0.1-rc.1
+          # 依赖不存在的 @deepseek-ai/dsh-type-meta；dsh-client-runtime 依赖不存在的
+          # dsh-compact，但 host 源码不用它）。cordis 无 scope 版本 4.0.0-rc.8。
+          pnpm add --ignore-workspace @deepseek-ai/dsh-tools@0.1.1-rc.2 cordis@4.0.0-rc.8 schemastery 2>&1 | tail -3
 
       - name: Install @types/node
         run: |
