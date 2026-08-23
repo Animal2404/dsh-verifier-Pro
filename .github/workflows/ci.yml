@@ -40,7 +40,7 @@ jobs:
           node --test tests/concurrency.test.mjs
           node --test tests/build_evidence.test.mjs
 
-  # 慢 job：bridge_fix 桥套件（需 pip 装 llm-verifier，缓存后 ~1 分钟）
+  # 慢 job：bridge_fix 桥套件（需 pip 装 llm-verifier）
   bridge:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -49,9 +49,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          # 无 cache: pip —— 仓库没有 requirements.txt/pyproject.toml 作为
+          # 缓存键文件，setup-python 的 pip cache 会直接报错。
 
-      - name: Install llm-verifier (cached)
+      - name: Install llm-verifier
         run: |
           python -m pip install --quiet "llm-verifier>=0.2.0"
 
