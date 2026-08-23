@@ -1193,13 +1193,17 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             }
             // 结构化导出：每步分数表 + 趋势 + JSONL 就绪串（lanbaolu 导出格式）。
             const scores = Array.isArray(raw.scores) ? raw.scores as number[] : []
-            const table = scores.map((s, i) => ({ step: i + 1, score: s }))
+            // 结构化导出：checkpoint 分数表（诚实标注——官方 track 对 N 步轨迹
+            // 返回的是前缀评分的 checkpoint 分数，数量 ≤ 步骤数，不逐一对位）。
+            const table = scores.map((s, i) => ({ checkpoint: i + 1, score: s }))
             const trend = scores.length >= 2 ? Number((scores[scores.length - 1] - scores[0]).toFixed(4)) : 0
             const exportable = {
               problem: esProblem,
               model,
               scored_at: new Date().toISOString(),
-              steps: table,
+              // 官方 track 语义：checkpoint 分数（前缀轨迹评分），非每步对位
+              checkpoints: table,
+              note: 'track 返回前缀评分的 checkpoint 分数，数量 ≤ 输入步骤数',
               trend,
               summary: scores.length ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)) : 0,
             }
