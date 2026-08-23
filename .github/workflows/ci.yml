@@ -16,22 +16,19 @@ jobs:
           node-version: 22
 
       - name: Install toolchain
-        # --legacy-peer-deps: the DSH ecosystem ships peer ranges that npm's
-        # strict resolver rejects (e.g. dsh-brand needs dsh-invariants
-        # ^0.0.1-rc but the resolved tree has 0.1.0-rc). The harness installs
-        # these via pnpm/bundles which tolerate the overlap; CI mirrors that.
-        run: npm install --no-audit --no-fund --legacy-peer-deps
+        # pnpm everywhere: DSH peer deps (dsh-scope etc.) are peerDependencies
+        # that npm skips even with --legacy-peer-deps; pnpm resolves them.
+        run: |
+          npm install -g pnpm@9
+          pnpm install --no-frozen-lockfile
 
       # The host typecheck/tests import DSH peer packages (dsh-tools,
-      # cordis, ...). Install dsh INTO the project (--no-save so package.json
-      # stays clean): npm hoists its transitive peers (@deepseek-ai/dsh-scope
-      # etc.) to the project node_modules, which the linked dsh-tools can then
-      # resolve. A GLOBAL install fails here — its nested node_modules are not
-      # visible to packages linked into the project (ERR_MODULE_NOT_FOUND
-      # @deepseek-ai/dsh-scope).
+      # cordis, ...). pnpm add @deepseek-ai/dsh into the project: pnpm links
+      # its peers (dsh-scope, dsh-tools, ...) so build.sh's DSH_INSTALL layout
+      # resolves them.
       - name: Install DSH peer bundle
         run: |
-          npm install --no-save --no-audit --no-fund --legacy-peer-deps @deepseek-ai/dsh
+          pnpm add --no-save --ignore-workspace @deepseek-ai/dsh
           echo "DSH_INSTALL=$PWD/node_modules/@deepseek-ai/dsh" >> "$GITHUB_ENV"
 
       - name: Build (host + client)
