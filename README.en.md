@@ -100,14 +100,40 @@ Talk to your agent; the injected system-prompt policy drives invocation:
 
 The verifier stays a pure reward function; writing is done by agents — a deliberate boundary.
 
-### /bestofn one-click command
+### /bestofn one-click command (dual-track since v0.7.0)
 
 ```
-/bestofn <goal> [N]                        # team mode: spawn N members implementing the goal → evidence chain → select → merge → gate
-/bestofn --local <c1> <c2> ... [--quick]   # local mode: evidence chain on existing artifacts → crash-out → select → report
+/bestofn <goal> [N]                        # BUILD track: spawn N lens-diverse members → plan gate → evidence chain → select → revision loop → merge → gate
+/bestofn --local <c1> <c2> ... [--summary name=text]   # local mode: evidence chain on existing artifacts → select → report
+/bestofn <audit goal description>          # AUDIT track: auto-selected when the deliverable is a report
 ```
 
-Smart input detection: plain text = goal (team mode); existing file paths = local scoring mode.
+Smart input detection: plain text = goal; existing file paths = local scoring mode.
+
+- **BUILD track**: N lens-diverse members (boldest / most defensive / performance-and-edge-cases — same complete scope, different angle) → **plan gate** (compare plans first, merge losers' strengths) → evidence chain per artifact (crash = out, unknown = out) → `select("deep_review")` → **revision loop** (findings go back verbatim, fixed with evidence, re-scored; cap 2 rounds) → integrate all survivors → compare gate.
+- **AUDIT track** (report/analysis deliverables): scope freeze + anti-contamination → parallel audits where EVERY claim cites file:line + quoted snippet → captain mechanically verifies ≥30% of citations plus ALL fatal findings (fabrication invalidates the finding and halves member weight) → mandatory cross-review → `select("root_cause")` → final report labels every finding **VERIFIED / REPORTED**.
+- **Stable candidate tags**: select results carry `tags`, compare carries `tag_a/tag_b` (first 8 hex of the candidate text). Positional letters shift between chained evaluations; tags never do.
+- Budget gate: state N and maxCostPerVerification before spawning.
+
+### /vselftest one-click self-test (v0.7.0+)
+
+Zero-argument AUDIT-track team audit of the plugin's own bestofn↔smoke boundary (N=2 lens-diverse members, citation verification fully on):
+
+```
+/vselftest                # default focus: artifactName hash ↔ smokeOk lookup + parseArgs edges
+/vselftest <focus note>   # custom focus
+```
+
+This is the "test ourselves with our own doctrine" entry point — its first run caught 4 bugs that three manual audit rounds had missed.
+
+### Depth criteria presets (v0.7.0+)
+
+Generic Correctness/Completeness/Clarity rubrics reward breadth and punish insight — LLM judges favor candidates that list many shallow observations over one that nails the root cause. For "which candidate is BETTER" questions use the built-in presets (expanded automatically on every scoring path):
+
+- `deep_review` — root cause pinned with evidence · failure modes & boundaries · tradeoffs · actionability
+- `root_cause` — root cause · evidence · impact
+
+Unknown names (e.g. official `terminal_bench`) pass through unchanged.
 
 ## Configuration
 

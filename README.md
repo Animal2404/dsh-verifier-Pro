@@ -127,22 +127,35 @@ bash scripts/build.sh
 
 verifier 只做 reward 函数，不做写手；整合由代理完成——这是刻意的设计边界，避免过度工程化。
 
-### /bestofn 一键命令（团队 Best-of-N 优选）
+### /bestofn 一键命令（团队 Best-of-N 优选 · v0.7.0 双轨）
 
-一条命令跑完整"优中选优"闭环——派 N 个成员完整实现同一任务，证据链淘汰崩溃候选，
-verifier select 细粒度优选，整合合并，compare 门禁：
+一条命令跑完整"优中选优"闭环。v0.7.0 起按交付物类型**自动分轨**——两种轨道的成功定义不同：
 
 ```
-/bestofn <goal> [N]                        # 团队模式：派 N 成员完整实现 → 证据链 → select → 合并 → 门禁
-/bestofn <goal> -n 5                        # 指定成员数
-/bestofn --local <c1> <c2> ... [--summary]  # 本地模式：对已有候选跑证据链 → select → 报告
+/bestofn <goal> [N]                        # BUILD 轨：派 N 成员完整实现 → 计划门禁 → 证据链 → select → 修订环 → 合并 → 门禁
+/bestofn <goal> -n 5                        # 指定成员数（≤8，超出静默截断并提示）
+/bestofn --local <c1> <c2> ... [--summary name=text]  # 本地模式：对已有候选跑证据链 → select → 报告
+/bestofn <审计目标描述>                      # AUDIT 轨：交付物是报告时自动切换
 ```
 
-- 团队模式：命令激活后你（队长）按 7 步协议执行——派 N 成员（每个**完整实现**，禁止分工切面）→
-  收集产物 → 每份跑证据链（崩溃出局）→ 幸存者 select → 整合合并 → compare 门禁 → 交付分数报告。
-- 本地模式：对工作区已有的 HTML/JS 候选直接跑证据链 → select，适合快速对比手头方案。
-- select 触发自适应 K 升级时，报告会附 `escalated / k_used / margin_before / margin_after`；
-  出现 `signal:"flat"` 时排名无信号，必须用 compare 复核前二名。
+**BUILD 轨**（可运行产物）：派 N 个**透镜分化**的成员（最大胆设计 / 最防御设计 / 性能与边界案例——任务范围完整一致，只有视角不同）→ **计划门禁**（先比方案、败方优点并入胜方再实现）→ 每份产物过证据链（崩溃出局、无记录=unknown 排除）→ `select("deep_review")` → **修订环**（发现的问题原样派回成员带证据修复→复评，上限 2 轮）→ 整合全部幸存者 → compare 门禁。
+
+**AUDIT 轨**（报告/分析类交付物）：范围冻结 + 反污染（审本项目禁止读历史审计文档）→ 并行审计（每条发现必须引用 file:line + 原文片段）→ 队长机械核验 ≥30% 引用 + 全部致命发现（伪造即无效并减半成员权重）→ 强制交叉审阅 → `select("root_cause")` → 最终报告逐条标注 **VERIFIED / REPORTED**。
+
+**稳定候选标签**：select 结果带 `tags`、compare 带 `tag_a/tag_b`（候选文本 sha256 前 8 位）。连续多轮评选拼子集时，位置字母会换指代而标签不变——按标签即可把第二轮的 A/B 对回第一轮的身份。
+
+其他协议升级：预算门禁（开跑前声明 N 与 maxCostPerVerification）、修订环闭环（验证不闭环 = 昂贵的橡皮图章）、深度纪律条款（浅而全必须输给深而准）。
+
+### /vselftest 一键自检（v0.7.0+）
+
+零参数对插件自身发起 AUDIT 轨团队审计（写死目标：bestofn↔smoke 协作边界；N=2 透镜成员；引用核验全开）：
+
+```
+/vselftest                # 默认聚焦：artifactName 哈希 ↔ smokeOk 查找 + parseArgs 边角
+/vselftest 重点查 XXX      # 自定义聚焦点
+```
+
+这是插件"用自己的教条测自己"的入口——首轮实战就抓出了 4 个人工三轮审计都漏掉的 bug。
 
 ### 证据链自动化（M3）
 
