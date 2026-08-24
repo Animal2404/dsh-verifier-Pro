@@ -146,6 +146,13 @@ fi
 
 "$TSDOWN" -c tsdown.config.ts
 
+echo "=== Compiling panelLogic for offline tests (CI parity) ==="
+# panelLogic.ts is excluded from tsconfig (src/client) and bundled by tsdown,
+# but the offline panel-logic tests import ../lib/client/panelLogic.js — CI
+# compiles it separately; keep the local build identical so `npm test` runs
+# the CURRENT panel logic, not a stale artifact from an earlier build.
+"$TSC" src/client/panelLogic.ts --outDir lib --rootDir src --module nodenext --moduleResolution nodenext --target es2022 --skipLibCheck --esModuleInterop
+
 echo "=== Wrapping client bundle into ModuleLoader protocol ==="
 node scripts/wrap_client.mjs
 

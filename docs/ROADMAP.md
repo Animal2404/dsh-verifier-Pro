@@ -19,18 +19,18 @@
 
 ## 里程碑
 
-### v0.5.0 — 安全与稳定基线（当前迭代收尾）
+### v0.5.0 — 安全与稳定基线（已达成）
 - [x] Client 侧工程化骨架（面板可构建、可注入）
 - [x] 并发信号量 + LRU 缓存 + 子进程超时 + 分数裁剪
 - [x] 离线测试基线（node:test，`npm test`）
-- [ ] probe 前置拦截 + anomaly 连续降级提示 + 私有符号 try-降级（P0-2 收尾）
-- [ ] CI（GitHub Actions：typecheck + test）
-- [ ] 真实会话四工具冒烟 + Web UI 渲染验证
+- [x] probe 前置拦截 + 异常分数形态检测（P0-2 收尾：probe_model 每调用前置；anomaly 连续降级提示未做）
+- [x] CI（GitHub Actions：typecheck + test，core/bridge/harness 三 job）
+- [x] 真实会话四工具冒烟 + Web UI 渲染验证
 
-### v0.6.0 — 可观测性与体验
-- [ ] 结构化错误码 + 会话事件留痕（verifier/* 事件流，client 面板消费）
-- [ ] usage/cost 工具 action 增强（token 计量接 maxCostPerVerification 强制执行）
-- [ ] track/progress 过信号量；evidence_chain 超时临时文件清理
+### v0.6.0 — 可观测性与体验（已达成）
+- [x] 结构化错误码 + 会话事件留痕（presentationMeta → block.meta，面板消费）
+- [x] usage/cost 工具 action 增强（token 计量 + maxCostPerVerification 强制预算拦截）
+- [x] track/progress 过信号量；select 临时缓存文件 finally 清理（evidence_chain 超时产物清理仍在 v0.7）
 - [ ] Composition 测试层（scratch profile 加载 + patch 层序校验脚本）
 
 ### v0.7.0 — 生态对齐

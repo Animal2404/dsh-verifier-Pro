@@ -2,24 +2,32 @@
 
 > 事实记录：每个版本实际完成了什么、验证状态如何。不做承诺（承诺看 PLAN.md）。
 
-## v0.5.0（当前 HEAD，待发布）
+## v0.7.0（当前 HEAD，2026-08-24 发布）
 
-### 已完成（Round A/B 三方审计 P1 全清 + P2 批量）
+### 已完成（第二轮深度审计修复 + 协议升级 + /vselftest 首轮实战闭环）
 
 | 批次 | 关键事项 | 验证 |
 |------|----------|------|
-| step ① | 诚实性修正（SECURITY.md 虚假声明 → 真实 sanitizeForVerifier 实现）、安装三连（包名/模型/Node 门槛）、编码事故修复、CHANGELOG 补 0.4.7-0.4.9 | typecheck + 测试全绿 |
-| step ② | F1 升级链 clamp + anomaly 透传（含面板 warning）；U-B1 escalationModel 接回同步路径 | 5 条升级链回归测试 |
-| steps ③④⑤⑥ | F3 NaN 协议加固、F4 images 双洞、F5 监听器泄漏、F6 共享并发闸门 + 服务缝走 runner（U-N2/U-N9）、U-N1 task_start 加固；F7-F13/F15-F17、U-B2/B3/B5/B6、U-N4/N5/N14 等批量；CI（GitHub Actions）；凭据解析加固（U-B4/U-N11/U-N7）+ history 轮转 | typecheck + 测试 + build 全绿 + 实弹冒烟 |
-| prompt 对账 | /bestofn 提示词三处对齐实际行为：证据链绝对路径（U-N5 同款 bug）、unknown-smoke 三态（U-N14）、anomaly/warning 转述义务（F1） | typecheck + 测试 |
-| Round C 批次 | R3-1 凭据键覆盖、F3-TS 坏帧正则、R3-2 unstable clamp 提前、R3-3~R3-6 上限/sanitize/过闸/criteria、R3-7~R3-19 批量 + tie-handling 提示词 | typecheck + **30/30** 测试（含 D-1 证据链回归 3 条）|
+| 审计修复批量 | 成本预算全路径生效、compare flat 警告保留、select 尊重 maxEscalateK、升级剥 seed、progress 分数裁剪、estimateCallMs 按 kind、降级探测 300s 节流、面板 anomaly 全类识别、桥 criteria 显式化 + 线程池背压 | typecheck + 回归测试 |
+| 协议升级 | PLAN GATE / REVISION LOOP（≤2轮）/ 对抗性提问闭环 / deep_review+root_cause 探究式预设（单一收口展开）/ 透镜分化 + 相互审阅轮 / BUILD-AUDIT 双轨 /bestofn（审计轨引用核验 + VERIFIED/REPORTED 标注）/ 预算门禁 | 协议文本经 verifier select("deep_review") 三方案评选 + compare K=3 复核产生 |
+| /vselftest 首轮实战 | 双成员透镜审计 bestofn↔smoke 边界 → 引用核验 ~20 锚点零伪造 → 交叉审阅两次定级纠偏 → root_cause 终评；18 项发现全部修复（state 自遮蔽、采集器跨运行 k× 膨胀、空名 summary 全局污染、目录幽灵块三重修复、summary 解析收口、unsupported 类别等）；稳定候选标签（sha256[:8]）+ 契约钉扎测试上线 | **72/72** 测试全绿 |
+
+## v0.5.0 → v0.6.x（已发布）
+
+### 已完成（Round A/B/C 审计 P1 全清 → 0.6.x 能力扩展）
+
+| 版本 | 关键事项 | 验证 |
+|------|----------|------|
+| v0.5.0 | Round A/B/C 三方审计全量修复（F1-F17/S1-S8/U-* 全落地，见 CHANGELOG）；CI（GitHub Actions 三 job）；凭据解析加固；history 轮转 | typecheck + 测试全绿 + 实弹冒烟 |
+| v0.6.0 | VAL 验证锚定、声明-证据对照、decompose/evaluate_session、异常分数形态检测、reason-first、maxCostPerVerification 真实实现、probe 1-token 化、面板逻辑抽离可测 | 55+ 测试 + CDP 面板回归 |
+| v0.6.1 | 档案表自愈（被动观测 + fail-closed + probe 自愈）、decompose 空响应根因修复、duration_ms/literal-mc 提示、面板内容/中文标题、CI 全量进 harness job | 59/59 测试全绿 |
 
 ### 测试现状
 
-- Offline 单测：**30 pass / 0 fail**（`npm test`：并发原语 11 + 升级链回归 5 + 凭据解析 8 + 证据链回归 3 + Round D 追加中）
+- Offline 单测：**72 pass / 0 fail**（`npm test`：并发原语 11 + 升级链回归 + 凭据解析 + 证据链 + 面板逻辑 + 异常形态 + 对抗探针 + bridge_fix 离线套件 + 契约钉扎）
 - 面板回归：CDP 截图脚本（scripts/cdp_web_screenshot.mjs）机器实测
-- CI：GitHub Actions（build + host/client typecheck + 离线单测），推送后生效
-- 已知遗留（全部低优先级）：F14 死配置 maxCostPerVerification（文档已如实标注 v0.6.0 待办）、U-N8 Semaphore 死 API、statusWait 2s 轮询、i18n 层缺失——详见 CHANGELOG 0.5.0 与本地审计清单（AUDIT-*.md 不入库）
+- CI：GitHub Actions 三 job（core 纯逻辑 / bridge 桥套件 / harness 全量含依赖 harness 的测试），推送后生效
+- 已知遗留（全部低优先级）：verifier ping action、anomaly 连续降级提示、私有符号全量降级、statusWait 2s 轮询、i18n 层缺失——详见 PLAN.md
 - Composition/E2E/GUI 层：**未建**（见 PLAN.md）
 
 ## v0.4.3 → v0.4.9（已发布）

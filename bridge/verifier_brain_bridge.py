@@ -74,13 +74,14 @@ _WORKERS = max(1, int(os.environ.get("VERIFIER_BRAIN_WORKERS", "4") or "4"))
 _POOL: ThreadPoolExecutor | None = None
 _POOL_GUARD = threading.Lock()
 
-# Official select/compare require keyword-only `criteria`; fall back to a
-# generic rubric when the caller omits it, avoiding a TypeError.
-DEFAULT_CRITERIA: dict[str, str] = {
-    "Correctness": "Does the answer correctly solve the problem, with no factual or logical errors?",
-    "Completeness": "Does the answer fully address every part of the problem without missing key requirements?",
-    "Clarity": "Is the answer clear, well-structured, and easy to understand?",
-}
+# U-N6 (P3-7): bounded request queue. TS-side semaphores gate the well-known
+# paths, but a direct bridge caller (service.direct / third-party plugin) can
+# still flood stdin. Beyond MAX_PENDING queued requests we answer immediately
+# with a loud error instead of queueing unbounded work (worker starvation →
+# cascading timeouts + wasted API spend).
+_MAX_PENDING = 200
+_PENDING_COUNT = 0
+_PENDING_GUARD = threading.Lock()
 
 
 def _jsonable(value: Any) -> Any:
@@ -299,7 +300,12 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("select requires a non-empty `candidates` array")
     criteria = kwargs.pop("criteria", None)
-    kwargs["criteria"] = criteria if criteria is not None else DEFAULT_CRITERIA
+    # P3-7: no silent DEFAULT_CRITERIA substitution — the TS/service layers
+    # require explicit criteria (U-N1); a direct bridge caller omitting it gets
+    # a loud error instead of a silently-changed scoring rubric.
+    if criteria is None:
+        raise ValueError("select requires `criteria` (a preset name or a {\"name\": \"description\"} object)")
+    kwargs["criteria"] = criteria
     # Keep evaluation cost bounded by default; explicit caller params win.
     # E2-fix (Round E): literal-mc (no-logprobs) models default to K=5 samples
     # (single draw is a 1/20 quantized estimate — too noisy).
@@ -348,7 +354,11 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(candidate_b, str):
         raise ValueError("compare requires `candidate_b` string")
     criteria = kwargs.pop("criteria", None)
-    kwargs["criteria"] = criteria if criteria is not None else DEFAULT_CRITERIA
+    # P3-7: see _handle_select — criteria must be explicit, never silently
+    # substituted with DEFAULT_CRITERIA.
+    if criteria is None:
+        raise ValueError("compare requires `criteria` (a preset name or a {\"name\": \"description\"} object)")
+    kwargs["criteria"] = criteria
     # E2-fix (Round E): literal-mc models default to K=5 (see _handle_select).
     _model = kwargs.get("model")
     if _model and bridge_fix is not None:
@@ -755,6 +765,41 @@ def _write_response_locked(stream: TextIO, payload: dict[str, Any]) -> None:
         _write_response(stream, payload)
 
 
+def _submit_with_backpressure(line: str, out: TextIO, pool: ThreadPoolExecutor) -> None:
+    """Submit one request line under the pending-queue bound (U-N6).
+
+    Over capacity: echo a loud error response (with the caller's id when the
+    line parses) instead of queueing unbounded work. The counter is decremented
+    when the worker finishes, so this is a real bound, not a rate limiter.
+    """
+    global _PENDING_COUNT
+    req_id = None
+    try:
+        req = json.loads(line)
+        req_id = req.get("id") if isinstance(req, dict) else None
+    except Exception:
+        pass
+    with _PENDING_GUARD:
+        if _PENDING_COUNT >= _MAX_PENDING:
+            _write_response_locked(out, {
+                "id": req_id,
+                "ok": False,
+                "error": {"type": "BridgeOverload", "message": f"bridge queue full ({_MAX_PENDING} pending) — retry later"},
+            })
+            return
+        _PENDING_COUNT += 1
+
+    def _run() -> None:
+        global _PENDING_COUNT
+        try:
+            _process_line_safe(line, out)
+        finally:
+            with _PENDING_GUARD:
+                _PENDING_COUNT -= 1
+
+    pool.submit(_run)
+
+
 def main() -> int:
     _load_plugin_env()
     # Proxy endpoints reject DeepSeek's thinking extra_body; "off" sends the
@@ -777,7 +822,7 @@ def main() -> int:
         for line in sys.stdin:
             if not line.strip():
                 continue
-            pool.submit(_process_line_safe, line, out)
+            _submit_with_backpressure(line, out, pool)
     finally:
         # Drain in-flight scoring work before interpreter shutdown, otherwise
         # a fast-close stdin kills queued requests mid-flight.

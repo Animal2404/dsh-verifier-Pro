@@ -102,7 +102,14 @@ export function derivePanelState(
   const { data, isError, running } = extracted
   const escalated = data?.escalated === true
   const signal = typeof data?.signal === 'string' ? data.signal : null
-  const hasAnomaly = data?.anomaly === 'reward_out_of_range' || data?.anomaly === 'score_out_of_range'
+  // P2-5: anomaly 识别必须覆盖全部三类防护标记——越界裁剪（reward/score）、
+  // 分数形态异常（anomalous_shape_*：NaN/全 0.5/全挤极端）、响应形态异常
+  // （response_shape_*：截断/循环重复/拒绝回答）。此前只认裁剪类，后两类
+  // 在面板上静默（不触发 L1 标注与说明卡）。
+  const anomalyKind = typeof data?.anomaly === 'string' ? data.anomaly : null
+  const hasAnomaly = anomalyKind === 'reward_out_of_range' || anomalyKind === 'score_out_of_range'
+    || (anomalyKind !== null && anomalyKind.startsWith('anomalous_shape'))
+    || (anomalyKind !== null && anomalyKind.startsWith('response_shape'))
     || (typeof data?.warning === 'string' && data.warning.includes('裁剪'))
   const scoreMode = typeof data?.score_mode === 'string' ? data.score_mode : null
 
@@ -136,7 +143,7 @@ export function derivePanelState(
 
   const noticeText = STATE_NOTES[stateKey]
     ?? (hasAnomaly
-      ? '⚠️ 评分返回过越界值，已被自动裁剪到 [0,1]——疑似评分模型异常或被注入，请人工复核本次结果。'
+      ? '⚠️ 本次评分触发了异常防护（越界裁剪 / 分数形态异常 / 响应形态异常）——疑似评分模型异常或被注入，请人工复核本次结果。'
       : null)
   const hostDetail = typeof data?.warning === 'string'
     ? data.warning

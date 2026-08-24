@@ -73,6 +73,21 @@ test('anomaly：越界裁剪 → ok 态也必须显示警告 + VAL L1', () => {
   assert.equal(p.valLevel, 'L1', '规则介入')
 })
 
+test('P2-5: anomalous_shape（NaN/全挤极端）→ 同样触发 L1 + 说明卡', () => {
+  const p = deriveOf({ action: 'select', index: 0, scores: [0.99, 0.98], anomaly: 'anomalous_shape', warning: '⚠️ 响应形态异常（degenerate_extreme）：疑似评分器退化' })
+  assert.equal(p.stateKey, 'ok')
+  assert.equal(p.valLevel, 'L1', '形态异常也触发规则介入标注')
+  assert.ok(p.noticeText, '说明卡存在')
+  assert.match(p.noticeText ?? '', /异常防护/, '说明卡指向异常防护')
+})
+
+test('P2-5: response_shape（截断/重复/拒绝）→ 同样触发 L1 + 说明卡', () => {
+  const p = deriveOf({ action: 'compare', reward_a: 0.6, reward_b: 0.4, anomaly: 'response_shape_incomplete', warning: '⚠️ 评分模型输出形态异常（截断）' })
+  assert.equal(p.valLevel, 'L1', '响应形态异常也触发规则介入')
+  assert.ok(p.noticeText)
+  assert.equal(p.hostDetail, '⚠️ 评分模型输出形态异常（截断）', '宿主 warning 透传为细节行')
+})
+
 test('plain：无数据 → 回退动作名徽章', () => {
   const p = derive(extract('verifier', null), 'select')
   assert.equal(p.stateKey, 'plain')

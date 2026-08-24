@@ -20,67 +20,6 @@ import { extractPanel, derivePanelState, ACTION_LABELS } from './panelLogic.js'
  * flips with the shell scheme automatically — zero hardcoded hex.
  */
 
-interface Extracted {
-  action: string
-  data: Record<string, unknown> | null
-  isError: boolean
-  running: boolean
-}
-
-function extract(toolName: string, blockRaw: unknown): Extracted {
-  // Guard: the framework spreads owner fields FLAT as props ({...owner}) — a
-  // missing/odd block must bail out, never throw (a throw here blanks the
-  // whole card via the error boundary).
-  if (!blockRaw || typeof blockRaw !== 'object') {
-    return { action: toolName, data: null, isError: false, running: false }
-  }
-  const block = blockRaw as Record<string, unknown>
-  const running = !('kind' in block)
-  const isError = block.isError === true
-
-  // Action from call args (running form keeps argsRaw at top level).
-  let action = toolName
-  try {
-    const argsRaw = (running ? block.argsRaw : (block.call as { argsRaw?: string } | null)?.argsRaw) ?? ''
-    if (typeof argsRaw === 'string' && argsRaw.trim().startsWith('{')) {
-      const args = JSON.parse(argsRaw) as { action?: unknown }
-      if (typeof args.action === 'string') action = args.action
-    }
-  } catch { /* args not JSON — keep default */ }
-
-  if (running || isError) return { action, data: null, isError, running }
-
-  // 1) structured meta passthrough
-  const meta = block.meta
-  if (meta && typeof meta === 'object') {
-    const m = meta as Record<string, unknown>
-    const candidate = (m.verifier ?? m.presentationMeta ?? m) as Record<string, unknown>
-    if (candidate && (candidate.action !== undefined || candidate.index !== undefined || candidate.reward_a !== undefined)) {
-      return { action: typeof candidate.action === 'string' ? candidate.action : action, data: candidate, isError, running }
-    }
-  }
-
-  // 2) parse the persisted model-facing JSON record
-  try {
-    const content = block.content as readonly unknown[]
-    const text = (content ?? [])
-      .map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text: unknown }).text) : ''))
-      .join('')
-    const parsed = JSON.parse(text) as Record<string, unknown>
-    if (parsed && typeof parsed === 'object') return { action, data: parsed, running, isError }
-  } catch { /* content is human-readable text — no card data */ }
-
-  return { action, data: null, isError, running }
-}
-
-const BADGE_LABELS: Record<string, string> = {
-  ok: '正常',
-  degraded: '信号不可信',
-  flat: '无区分度',
-  unstable: '信号不稳',
-  error: '出错',
-}
-
 export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const extracted = React.useMemo(
@@ -94,6 +33,10 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
   const index = typeof data?.index === 'number' ? data.index : null
   const scores = Array.isArray(data?.scores) ? (data.scores as number[]) : null
+  // 稳定候选标签：跨轮评选拼子集时字母会换指代，内容哈希标签不变。
+  const tags = Array.isArray(data?.tags) ? (data.tags as string[]) : null
+  const tagA = typeof data?.tag_a === 'string' ? data.tag_a : null
+  const tagB = typeof data?.tag_b === 'string' ? data.tag_b : null
   const rewardA = typeof data?.reward_a === 'number' ? data.reward_a : null
   const rewardB = typeof data?.reward_b === 'number' ? data.reward_b : null
 
@@ -125,7 +68,7 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
         <div style={styles.scores}>
           {scores.map((s, i) => (
             <span key={i} style={i === index ? styles.scoreTop : styles.score}>
-              {letterAt(i)}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
+              {letterAt(i)}{tags?.[i] ? `·${tags[i]}` : ''}: {Number.isFinite(s) ? s.toFixed(3) : '—'}{i === index ? ' 🏆' : ''}
             </span>
           ))}
         </div>
@@ -133,8 +76,8 @@ export function VerifierPanel(props: ToolCallOwnerProps & { ctx?: ClientContext 
 
       {!running && rewardA !== null && rewardB !== null && (
         <div style={styles.scores}>
-          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreTop : styles.score}>A: {rewardA.toFixed(3)}</span>
-          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreTop : styles.score}>B: {rewardB.toFixed(3)}</span>
+          <span style={(rewardA ?? 0) >= (rewardB ?? 0) ? styles.scoreTop : styles.score}>A{tagA ? `·${tagA}` : ''}: {rewardA.toFixed(3)}</span>
+          <span style={(rewardB ?? 0) > (rewardA ?? 0) ? styles.scoreTop : styles.score}>B{tagB ? `·${tagB}` : ''}: {rewardB.toFixed(3)}</span>
         </div>
       )}
 

@@ -48,6 +48,7 @@ function collectSummaries() {
     if (raw === undefined) continue
     const eq = raw.indexOf('=')
     if (eq > 0) per.set(raw.slice(0, eq).trim(), raw.slice(eq + 1))
+    else if (eq === 0) { /* vselftest-M-C: '=text'（空名）来自坏生产者——忽略，不污染 global */ }
     else global = raw
   }
   return { per, global }

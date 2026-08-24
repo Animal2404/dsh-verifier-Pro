@@ -31,8 +31,11 @@ import { basename, extname, join, resolve } from 'node:path'
 
 const OUT_DIR = resolve(process.argv[findArg('--out')] ?? join(process.cwd(), 'tmp_articles', 'smoke'))
 const CDP_PORT = Number(process.argv[findArg('--cdp-port')] ?? 9222)
-const TICKS = Number(process.argv[findArg('--ticks')] ?? 300)
-const WAIT_MS = Number(process.argv[findArg('--wait')] ?? 1500)
+// vselftest-m2：值位垃圾（`--ticks x` → NaN）不再产生静默零循环/零等待。
+const rawTicks = Number(process.argv[findArg('--ticks')])
+const TICKS = Number.isFinite(rawTicks) && rawTicks > 0 ? Math.floor(rawTicks) : 300
+const rawWait = Number(process.argv[findArg('--wait')])
+const WAIT_MS = Number.isFinite(rawWait) && rawWait > 0 ? Math.floor(rawWait) : 1500
 const AS_JSON = process.argv.includes('--json')
 
 const VALUED_ARGS = new Set(['--out', '--cdp-port', '--ticks', '--wait'])
@@ -109,14 +112,21 @@ async function cdpConnect(port) {
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
   let seq = 0
   const pending = new Map()
-  // 收集运行时异常（含异步 setTimeout/rAF 回调里的错误——审计 P0-3）
-  const collectedExceptions = []
+  // 收集运行时异常（含异步 setTimeout/rAF 回调里的错误——审计 P0-3）。
+  // vselftest-M2：异常携带来源 frameId——Page.navigate 换页后旧页面的迟到异常
+  // 不得记到新候选头上（此前无归属过滤 → 无辜候选被误判 crashed）。
+  const collectedExceptions = [] // [{ text, frameId }]
+  const ctxFrame = new Map()     // executionContextId -> frameId
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data)
+    if (msg.method === 'Runtime.executionContextCreated') {
+      const c = msg.params?.context
+      if (c?.id !== undefined) ctxFrame.set(c.id, c.auxData?.frameId ?? null)
+    }
     if (msg.method === 'Runtime.exceptionThrown') {
       const d = msg.params?.exceptionDetails
       const text = d?.exception?.description || d?.text || 'unknown exception'
-      collectedExceptions.push(text.slice(0, 200))
+      collectedExceptions.push({ text: String(text).slice(0, 200), frameId: ctxFrame.get(d?.executionContextId) ?? null })
     }
     if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id) }
   }
@@ -136,11 +146,17 @@ async function cdpConnect(port) {
 }
 
 // ---------- HTML 冒烟 ----------
-/** 每个新文档创建时注入的错误采集器（导航不会丢失——审计 P0-3 修复）。 */
+/** 每个新文档创建时注入的错误采集器（导航不会丢失——审计 P0-3 修复）。
+ *  vselftest-M1：源码自守卫（浏览器侧幂等）——外部 Chrome 被多个运行复用时，
+ *  addScriptToEvaluateOnNewDocument 会累积注册 k 份脚本；此前每份都重置
+ *  __errs 并各挂一对监听器 → 错误被计 k×。改为首份安装、其余跳过。 */
 const ERR_COLLECTOR = `
-window.__errs = [];
-window.addEventListener('error', e => window.__errs.push(String(e.message)));
-window.addEventListener('unhandledrejection', e => window.__errs.push('unhandledrejection: ' + String(e.reason)));
+if (!window.__errCollectorInstalled) {
+  window.__errCollectorInstalled = true;
+  window.__errs = [];
+  window.addEventListener('error', e => window.__errs.push(String(e.message)));
+  window.addEventListener('unhandledrejection', e => window.__errs.push('unhandledrejection: ' + String(e.reason)));
+}
 'ok'`
 
 // ---------- F10: collision-proof artifact naming ----------
@@ -158,13 +174,12 @@ function artifactName(file) {
 async function smokeHtml(cdp, file, outDir) {
   const name = artifactName(file)
   const fileUrl = 'file:///' + resolve(file).replace(/\\/g, '/')
-  // 清空上一候选的异常残留，避免会话级收集器跨候选串扰
+  // 清空上一候选的异常残留 + 捕获本次导航的 frameId：vselftest-M2——旧页面
+  // 的迟到异常按 frameId 过滤（清零发生在下一候选导航之前，纯时序屏障挡不住
+  // A 页异步错误落进 B 的证据）。
   cdp.collectedExceptions.length = 0
-  // R3-10: ERR_COLLECTOR is injected ONCE per CDP session (in main) — the old
-  // per-candidate addScriptToEvaluateOnNewDocument accumulated k collectors
-  // after k candidates, each pushing into the same window.__errs and inflating
-  // the error count by up to k× per page.
-  await cdp.send('Page.navigate', { url: fileUrl })
+  const nav = await cdp.send('Page.navigate', { url: fileUrl })
+  const currentFrameId = nav.result?.frameId ?? null
   await new Promise(r => setTimeout(r, WAIT_MS))
   const result = await cdp.evalJs(`
     (function(){
@@ -180,17 +195,21 @@ async function smokeHtml(cdp, file, outDir) {
           catch (e) { errs.push(String(e.message) + ' @' + i); break; }
         }
         if (typeof draw === 'function') { try { draw(); } catch (e) { errs.push('draw: ' + e.message); } }
-        let state = null
-        try { state = (typeof state !== 'undefined') ? state : null } catch {}
+        let pageState = null
+        try { pageState = (typeof state !== 'undefined' && state != null) ? state : null } catch {}
         const p = (typeof player !== 'undefined' && player) ? { x: Math.round(player.x), y: Math.round(player.y) } : null
-        return JSON.stringify({ hasUpdate, ticksRun, errors: errs.slice(0, 5), globalErrs: (window.__errs || []).slice(0, 5), state, player: p })
+        return JSON.stringify({ hasUpdate, ticksRun, errors: errs.slice(0, 5), globalErrs: (window.__errs || []).slice(0, 5), state: pageState, player: p })
       } catch (e) { return JSON.stringify({ fatal: String(e.message) }) }
     })()
   `)
   let parsed
   try { parsed = JSON.parse(result) } catch { parsed = { raw: result } }
-  // globalErrs 现在来自新文档的监听器（真实页面错误）+ CDP exceptionThrown 事件
-  const errors = [...(parsed.errors || []), ...(parsed.globalErrs || []), ...(parsed.fatal ? [parsed.fatal] : []), ...cdp.collectedExceptions]
+  // globalErrs 现在来自新文档的监听器（真实页面错误）+ CDP exceptionThrown 事件；
+  // exceptionThrown 按 frameId 归属当前候选（vselftest-M2），上一页的迟到异常被滤除。
+  const frameErrors = cdp.collectedExceptions
+    .filter((e) => !e.frameId || e.frameId === currentFrameId)
+    .map((e) => e.text)
+  const errors = [...(parsed.errors || []), ...(parsed.globalErrs || []), ...(parsed.fatal ? [parsed.fatal] : []), ...frameErrors]
   // 无 update 函数的静态页：探针无法驱动行为，显式标记 unknown 而非静默 ok:true（审计 P0-3）
   const probeable = parsed.hasUpdate === true
   if (!probeable && errors.length === 0) {
@@ -227,7 +246,9 @@ async function smokeHtml(cdp, file, outDir) {
 async function withChrome(fn) {
   let chrome
   try {
-    await cdpConnect(CDP_PORT) // 已有端点直接复用
+    // vselftest-m6：探测连接用完即关（此前 reachability 探测的 WebSocket 泄漏）。
+    const probe = await cdpConnect(CDP_PORT) // 已有端点直接复用
+    probe.close()
   } catch {
     const candidates = [
       process.env.CHROME_PATH,
@@ -239,7 +260,7 @@ async function withChrome(fn) {
     if (!found) throw new Error('no Chrome found; set CHROME_PATH or start one with --remote-debugging-port=' + CDP_PORT)
     chrome = spawn(found, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--disable-gpu', '--no-first-run', 'about:blank'], { stdio: 'ignore' })
     for (let i = 0; i < 40; i++) {
-      try { await cdpConnect(CDP_PORT); break } catch { await new Promise(r => setTimeout(r, 500)) }
+      try { const p = await cdpConnect(CDP_PORT); p.close(); break } catch { await new Promise(r => setTimeout(r, 500)) }
     }
   }
   try {
@@ -257,9 +278,20 @@ async function main() {
     return
   }
   mkdirSync(OUT_DIR, { recursive: true })
+  const RUNNABLE_NODE = new Set(['.js', '.mjs', '.cjs'])
   const htmlFiles = files.filter(f => kindOf(f) === 'html')
-  const nodeFiles = files.filter(f => kindOf(f) === 'node')
+  // vselftest-m8：显式传入的非可运行文件（.md/.txt/…）不再被当 Node 脚本执行
+  // 后报 "exit code 1"（误导性 crashed）——标记 unsupported，冒烟记录省略 ok
+  // 字段 → 下游 smokeOk 判 undefined → unknown 排除出排名（U-N14 语义）。
+  const nodeFiles = files.filter(f => kindOf(f) === 'node' && RUNNABLE_NODE.has(extname(f).toLowerCase()))
+  const unsupportedFiles = files.filter(f => kindOf(f) === 'node' && !RUNNABLE_NODE.has(extname(f).toLowerCase()))
   const results = []
+
+  for (const f of unsupportedFiles) {
+    const r = { file: f, kind: 'unsupported', errors: [], exitCode: null, note: 'non-runnable file type — not executed; rename to .js/.mjs/.cjs or wrap in a runnable harness to behavior-smoke it' }
+    results.push(r)
+    writeFileSync(join(OUT_DIR, artifactName(f) + '.smoke.json'), JSON.stringify(r, null, 2), 'utf8')
+  }
 
   // Node 冒烟并行
   await Promise.all(nodeFiles.map(async (f) => {
@@ -297,16 +329,21 @@ async function main() {
     console.log(JSON.stringify(results, null, 2))
   } else {
     for (const r of results) {
-      console.log(`${r.ok ? '✅' : '❌'} ${r.file} [${r.kind}]` +
-        (r.errors.length ? ` errors=${JSON.stringify(r.errors)}` : '') +
+      const mark = r.kind === 'unsupported' ? '⏭️' : (r.ok ? '✅' : '❌')
+      console.log(`${mark} ${r.file} [${r.kind}]` +
+        (r.errors?.length ? ` errors=${JSON.stringify(r.errors)}` : '') +
         (r.exitCode !== null && r.exitCode !== undefined ? ` exit=${r.exitCode}` : '') +
+        (r.note ? ` note=${r.note}` : '') +
         (r.screenshot ? ` shot=${r.screenshot}` : ''))
     }
-    const ok = results.filter(r => r.ok).length
-    console.log(`\n${ok}/${results.length} passed`)
+    const judged = results.filter(r => r.kind !== 'unsupported')
+    const ok = judged.filter(r => r.ok).length
+    const skipped = results.length - judged.length
+    console.log(`\n${ok}/${judged.length} passed${skipped ? `（另 ${skipped} 个 unsupported 跳过）` : ''}`)
   }
-  // 自然退出（避免 process.exit 与 WebSocket/child 清理竞态触发 UV 断言）
-  process.exitCode = results.every(r => r.ok) ? 0 : 1
+  // 自然退出（避免 process.exit 与 WebSocket/child 清理竞态触发 UV 断言）。
+  // vselftest-m8：unsupported 候选不计入失败（它们没被执行，不是崩溃）。
+  process.exitCode = results.filter(r => r.kind !== 'unsupported').every(r => r.ok) ? 0 : 1
 }
 
 main().catch(e => { console.error('smoke fatal:', e); process.exit(1) })

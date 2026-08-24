@@ -3,7 +3,7 @@
 // esc.escalationModel (tiered scoring) on the runner shared by sync + async.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createEscalationRunner } from '../lib/tools.js'
+import { createEscalationRunner, clampSingleScore } from '../lib/tools.js'
 
 /** Fake bridge: scripted responses + request log. probe_model always passes
  * (the runner's D-1x per-model preflight must not consume scripted responses). */
@@ -121,4 +121,86 @@ test('R3-2: select unstable branch returns CLAMPED escalated scores (no leak)', 
   for (const s of escScores) {
     assert.ok(typeof s === 'number' && s >= 0 && s <= 1, 'unstable escalated scores must be clamped: ' + String(s))
   }
+})
+
+test('P1-2: compare flat branch preserves the k1 clip/anomaly warning (no clobber)', async () => {
+  const bridge = fakeBridge([
+    { reward_a: 1.9, reward_b: 1.9 }, // k1: out of range → clamped 1.0/1.0 → margin 0 → flat
+  ])
+  const run = createEscalationRunner(baseDeps(bridge, {}))
+  const out = await run('compare', { problem: 'p-p12-flat', candidate_a: 'a', candidate_b: 'b' })
+  assert.equal(out.signal, 'flat')
+  assert.ok(typeof out.warning === 'string' && out.warning.includes('裁剪'),
+    'clip/anomaly warning must survive the flat branch: ' + String(out.warning))
+  assert.ok(out.warning.includes('且：'), 'merged with the flat guidance instead of replaced')
+})
+
+test('P1-3: select escalation honors maxEscalateK (was hardcoded 3)', async () => {
+  const bridge = fakeBridge([
+    { index: 0, scores: [0.55, 0.50] }, // k1: margin 0.05 → escalate
+    { index: 0, scores: [0.58, 0.52] }, // escalation tournament
+  ])
+  const run = createEscalationRunner(baseDeps(bridge, { maxEscalateK: 5 }))
+  const out = await run('select', { problem: 'p-p13-k5', candidates: ['a', 'b'] })
+  const escCall = bridge.calls.find((c) => c.method === 'select' && c.params.n_evaluations === 5)
+  assert.ok(escCall, 'escalation call with n_evaluations=5 present')
+  assert.equal(out.escalated, true)
+  assert.equal(out.k_used, 5, 'k_used reports the configured K')
+})
+
+test('P2-1: select escalation strips the caller seed (independent re-evaluation)', async () => {
+  const bridge = fakeBridge([
+    { index: 0, scores: [0.55, 0.50] }, // k1
+    { index: 0, scores: [0.58, 0.52] }, // escalation
+  ])
+  const run = createEscalationRunner(baseDeps(bridge, {}))
+  const out = await run('select', { problem: 'p-p21-seed', candidates: ['a', 'b'], seed: 42 })
+  assert.equal(out.escalated, true)
+  const k1Call = bridge.calls.find((c) => c.method === 'select' && c.params.n_evaluations === 1)
+  assert.equal(k1Call.params.seed, 42, 'k1 keeps the caller seed')
+  const escCall = bridge.calls.find((c) => c.method === 'select' && c.params.n_evaluations === 3)
+  assert.ok(escCall, 'escalation call present')
+  assert.equal(escCall.params.seed, undefined, 'escalation must NOT reuse the caller seed')
+})
+
+test('P2-2: clampSingleScore clips out-of-range progress scores and flags anomaly', () => {
+  const r = { score: 3.7 }
+  clampSingleScore(r)
+  assert.equal(r.score, 1, 'clamped to [0,1]')
+  assert.equal(r.anomaly, 'score_out_of_range')
+  assert.ok(String(r.warning).includes('裁剪'), 'clip warning present')
+  const ok = { score: 0.42 }
+  clampSingleScore(ok)
+  assert.equal(ok.score, 0.42)
+  assert.equal(ok.anomaly, undefined)
+})
+
+test('deep_review 预设：criteria 名称在进桥前展开为描述对象（全路径收口）', async () => {
+  const bridge = fakeBridge([{ reward_a: 0.7, reward_b: 0.3 }])
+  const run = createEscalationRunner(baseDeps(bridge))
+  await run('compare', { problem: 'p-preset-dr', candidate_a: 'a', candidate_b: 'b', criteria: 'deep_review' })
+  const sent = bridge.calls.find((c) => c.method === 'compare').params.criteria
+  assert.ok(sent && typeof sent === 'object' && !Array.isArray(sent), '必须展开为描述对象: ' + JSON.stringify(sent))
+  assert.ok('RootCause' in sent && 'Evidence' in sent && 'Actionability' in sent, '包含深度维度键')
+})
+
+test('未知预设名原样透传（官方预设 terminal_bench 不受影响）', async () => {
+  const bridge = fakeBridge([{ reward_a: 0.7, reward_b: 0.3 }])
+  const run = createEscalationRunner(baseDeps(bridge))
+  await run('compare', { problem: 'p-preset-unk', candidate_a: 'a', candidate_b: 'b', criteria: 'terminal_bench' })
+  const sent = bridge.calls.find((c) => c.method === 'compare').params.criteria
+  assert.equal(sent, 'terminal_bench', '未知名不得被改动')
+})
+
+test('candTag：同一候选跨调用标签稳定，不同候选标签不同（用户反馈：字母换指代）', async () => {
+  const bridge = fakeBridge([
+    { reward_a: 0.7, reward_b: 0.3 },
+    { reward_a: 0.7, reward_b: 0.3 },
+  ])
+  const run = createEscalationRunner(baseDeps(bridge))
+  const r1 = await run('compare', { problem: 'p-tag-1', candidate_a: 'alpha-content', candidate_b: 'beta-content' })
+  const r2 = await run('compare', { problem: 'p-tag-2', candidate_a: 'alpha-content', candidate_b: 'beta-content' })
+  assert.ok(r1.tag_a && String(r1.tag_a).length === 8, '标签为 8 位十六进制')
+  assert.equal(r2.tag_a, r1.tag_a, '同一候选跨调用标签必须稳定')
+  assert.notEqual(r1.tag_a, r1.tag_b, '不同候选标签必不同')
 })

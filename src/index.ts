@@ -30,7 +30,7 @@ import { verifierUsageSection, bestOfNProtocolSection } from './prompt.js'
 import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
 import { Semaphore } from './concurrency.js'
-import { registerBestOfNCommand } from './bestofn.js'
+import { registerBestOfNCommand, registerSelfTestCommand } from './bestofn.js'
 
 export const name = '@dsh-external/dsh-verifier-pro'
 export const inject = ['tools', 'systemPrompt']
@@ -176,6 +176,11 @@ export function apply(ctx: Context, config: Config): void {
     esc: escalation,
     budgetMs: () => config.taskTimeoutMs ?? 1_800_000,
     scoringGate,
+    // #11: 异步任务 / 服务缝 / /bestofn 走同一个 runner——成本预算必须在这里
+    // 也生效（runSelect/runCompare 内的 costGuard 读的就是这份配置）。
+    maxCostPerVerification: config.maxCostPerVerification,
+    costPer1kInputTokens: config.costPer1kInputTokens,
+    costPer1kOutputTokens: config.costPer1kOutputTokens,
   })
 
   const tasks = createVerifierTaskManager(getBridge, store, config.taskTimeoutMs ?? 1_800_000, runner)
@@ -214,6 +219,8 @@ export function apply(ctx: Context, config: Config): void {
       runner,
       defaultModel: config.verifierModel,
     })
+    // 一键自检：对插件自身发起 AUDIT 轨团队审计（用户要求的一键命令）。
+    registerSelfTestCommand(commandCtx)
   })
 
   if (config.promptSection ?? true) {

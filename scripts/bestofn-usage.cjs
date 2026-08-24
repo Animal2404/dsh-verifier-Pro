@@ -47,7 +47,7 @@ const MD = [
   '',
   '1. **派发**：插件经 agent_teams 精确派出 `N` 个成员，每个成员拿到**完全相同**的任务：独立实现完整目标，把交付物保存到自己的路径并上报。',
   '2. **收集**：收集 `N` 个候选产物及其路径、自描述。',
-  '3. **证据链（evidence chain）**：对每个产物运行 `node scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>`。冒烟结果 `ok=false`（崩溃 / 非零退出码 / 运行期错误）的候选**当场出局**，绝不进入打分。',
+  '3. **证据链（evidence chain）**：对每个产物运行 `node <pluginRoot>/scripts/evidence_chain.mjs <artifact> --summary <name>=<self-description>`（`<pluginRoot>` 换成插件实际安装目录的绝对路径——脚本在插件安装里，不在你的工作区）。冒烟结果 `ok=false`（崩溃 / 非零退出码 / 运行期错误）的候选**当场出局**，绝不进入打分；无冒烟记录（unknown）同样排除出排名。',
   '4. **select 打分**：幸存者的证据块交给 `verifier select` 排序。分数差距落在噪声带时，系统自动升级为 K 轮重复评估并返回**平均后的结果**与升级元数据（见「报告信号」）。',
   '5. **整合合并（integrate）**：把**所有幸存者**连同各自分数交给整合者（专职成员或队长另起一轮），合成一份取各家之长的交付物。注意：只取冠军是「排名」，不是 Best-of-N——亚军、季军往往各有强项，必须参与合并。',
   '6. **门禁（compare gate）**：把合并产物再过一遍证据链，然后 `verifier compare(合并版, 冠军)`。只有当合并版分数**不低于**冠军（噪声带内）才采用合并版；否则回退到冠军并说明原因。',

@@ -305,7 +305,7 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 
 ```bash
 # 1) 安装（推荐钉扎）
-dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.6.1
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.7.0
 
 # 2) 检查环境（凭据 + .venv + 产物一次诊断）
 cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
@@ -334,6 +334,21 @@ cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
 ```
 
 > ⚠️ **不支持权重对象**（如 `{"Correctness": 0.5, ...}`）：llm-verifier 后端把 criteria 值当作描述文本处理，数值会被字符串化成无意义的 `"0.5"` 标准。传入全数值对象时工具会**直接报错拒绝**，请改用描述对象。若确需加权，请在问题文本（`problem`）中显式说明各维度的相对重要性。
+
+### 内置深度预设（v0.7.0+）
+
+通用三件套（Correctness/Completeness/Clarity）奖励广度、惩罚洞察——LLM 评委天然偏袒「面面俱到的浅层候选」。评「哪个方案/分析**更好**」时请用内置预设（在进桥前自动展开为描述对象，同步/异步/服务缝全路径可用）：
+
+| 预设名 | 维度 | 适用场景 |
+|--------|------|----------|
+| `deep_review` | 根因(带证据) · 证据锚定 · 失败模式与边界 · 权衡取舍 · 可执行性 | 方案择优、深度审查、计划门禁 |
+| `root_cause` | 根因(带证据) · 证据锚定 · 影响面 | 缺陷分析、事故复盘 |
+
+```
+verifier select criteria="deep_review" problem="哪个实现更好？" candidates=[...]
+```
+
+未知名（如 `terminal_bench`）原样透传给官方包，行为不变。
 
 ## 参考项目
 

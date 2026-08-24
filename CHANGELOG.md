@@ -2,6 +2,55 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.7.0] - 2026-08-24（第二轮深度审计修复 + 协议升级）
+
+### Added
+- **深度导向 criteria 预设**：内置 `deep_review`（根因+证据/失败模式/权衡/可执行性）与 `root_cause`——措辞为**探究式强制点名**：「指出至少一个非显然边界案例及处理方式」「引用可复制的证据行」，空泛断言（"已考虑边界情况"/"权衡过"）明确判低。通用 Correctness/Completeness/Clarity 三件套奖励广度、惩罚洞察，是「team 分析全面但浮于表面」的结构性对策。在 runSelect/runCompare 单一收口展开：同步工具 / 异步 task_start / 服务缝 / /bestofn 全路径可用；未知预设名原样透传（官方 terminal_bench 等不受影响）
+- **协议升级（PLAN GATE + REVISION LOOP + 对抗性提问）**：
+  - **计划门禁**——/bestofn 协议与系统提示词新增：派发完整实现前先收集各成员简案 → `verifier compare(criteria:"deep_review")` 选优 → 败方方案优点并入胜方再派发（砍错方向是最便宜的修复）
+  - **修订环**——verifier/decompose 检出的失败归因与核查问题必须**原样派回**责任成员带证据解决 → 重跑证据链 → 复评；上限 2 轮防成本失控。验证不闭环 = 昂贵的橡皮图章
+  - **对抗性提问闭环**——decompose 核查问题 → 成员逐条带证据回答 → Q&A 追加进候选证据文本 → 复评；回避/绕圈式回答本身就是出局信号
+  - **深度纪律条款**——浅而全的候选必须输给深而准；rubric 表达不了这一点就是 rubric 的 bug
+- **团队协作升级（吸收同赛道项目评审意见，加约束版）**：**透镜分化**——相同提示词的 LLM 成员产出会趋同；队长应给每个成员分配不同「透镜」（最大胆设计 / 最防御设计 / 性能与边界案例），但任务范围必须完整且一致——拆分范围=任务分解=排名失效；**相互审阅轮**（仅高风险目标）——初稿后每人指出另一成员产物最致命的一个缺陷（带证据），批评意见作为额外证据块进入 select
+- **双轨协议（BUILD / AUDIT）**：/bestofn 按交付物类型分轨。起因：smoke 链的 kindOf 把一切非 HTML 文件当 Node 脚本执行——.md 审计报告会 SyntaxError → ok=false → 被当崩溃候选淘汰，**审计类任务此前根本无法用 /bestofn 跑**。审计轨改为「引用核验」：每条发现必须引用 file:line + 原文片段，队长机械抽查 ≥30% 引用 + 全部致命发现（grep/read），伪造引用即无效并减半该成员合并权重；范围冻结 + 反污染（审本项目禁止读历史审计文档防抄答案）；评分自动切换 root_cause 预设；最终报告逐条标注 VERIFIED/REPORTED。另加**预算门禁**：开跑前必须声明 N 与成本上限，无预算不开跑
+- 新协议文本本身经 **verifier select("deep_review") 三方案评选 + compare 升级复核（K=3 一致 3/3）** 产生——工具用自己的教条改造自己
+- **稳定候选标签（用户反馈：连续评选时字母换指代）**：select 结果带 `tags`、compare 带 `tag_a/tag_b`——候选文本 sha256 前 8 位，同一候选在任何一轮评估中标签不变；文本渲染与面板同步显示「A·3f2a1b9c」，跨轮拼子集按标签即可对回原始身份
+- **`/vselftest` 一键自检命令**：对插件自身 bestofn↔smoke 协作边界发起 AUDIT 轨团队审计（范围冻结 + 反污染 + 引用核验 + 交叉审阅），零参数开跑
+- **/vselftest 首轮实战修复（双成员审计 → 引用核验 0 伪造 → 交叉审阅纠偏 → root_cause 终评）**：
+  - ★ **smoke.mjs `let state` 自遮蔽**——冒烟记录 state 字段恒 null（双方独立确认的新 bug，一行修复）
+  - ★ **ERR_COLLECTOR 浏览器侧幂等守卫**——外部 Chrome 复用时 k 份采集器致错误 k× 计数（R3-10 只防了运行内累积），健康候选曾被误杀
+  - **CDP 异常按 frameId 归属**——上一候选的迟到异常不再记到下一候选头上（"误判 crashed"根除）
+  - **目录输入三重修复**——bestofn 本地模式显式拒绝并给展开指引；evidence_chain 展开目录后再喂 build_evidence（幽灵块根除）；四进程 cwd 钉扎插件根 + 输入绝对化（身份与继承巧合解耦）
+  - **--summary 解析收口**——裸 summary / 空名 `=text` 拒收 + 无条件消费值 token（不再漏回参数流翻转 local⇒team；build_evidence 消费端同步守卫）
+  - **-n 条件前进**——无效值不再吞掉紧随的候选文件，stderr 告警；N 截断透明化提示
+  - **unsupported 类别**——.md/.txt 等不可运行文件标 ⏭️ 跳过而非 "exit code 1" 误导性 crashed（不计失败退出码）
+  - **bare catch 诊断化**——evidence.json/smoke.json 解析失败写 stderr，损坏不再伪装缺失
+  - --ticks/--wait 值位垃圾消毒；探测 WebSocket 用完即关
+  - **契约钉扎测试**（tests/audit-contract.test.mjs）——artifactName 双实现哈希宽度/stem 规则、段落标题锚点、采集器幂等守卫，任一分叉 CI 即红
+
+### Fixed
+- **P1-① 成本预算覆盖不全**：`maxCostPerVerification` 守卫从工具 handler 下沉到 `runSelect`/`runCompare`/track 入口——此前只拦同步 select/compare，异步 task_start、服务缝、/bestofn 路径可无上限花钱；现全路径生效（tools.ts costGuard + EscalationDeps 挂成本配置）
+- **P1-② compare flat 分支覆盖异常警告**：flat 结果不再用通用文案替换 k1 的越界裁剪警告——现在与 select 分支一致地合并（`警告 且：无可靠信号…`），模型/面板能看到裁剪警示
+- **P1-③ select 升级忽略 maxEscalateK**：升级锦标赛 n_evaluations 硬编码 3 → 尊重配置（escK = clamp(maxEscalateK, 2, 8)），k_used 如实上报；预算可行性检查同步按 escK 缩放
+- **P2-① select 升级复用调用方 seed**：升级轮剥离 seed——同 seed 同 RNG 会让"独立重评"与首评强相关
+- **P2-② progress_update 分数未过 clamp01**：新增导出的 `clampSingleScore`，progress 分数与其它评分路径一样裁剪 + anomaly 标记
+- **P2-③ estimateCallMs 混入异类时长**：compare 升级预算改用同 kind（compare）历史中位，不再混入 select/track 时长
+- **P2-④ 降级模型 live 复核无节流**：DEGRADED 模型的 4096-8192 token 复核探测加 300s TTL 节流——反复重试不再白烧探测费（fail-closed 不变）
+- **P2-⑤ 面板 anomaly 识别不全**：panelLogic hasAnomaly 覆盖 `anomalous_shape_*`/`response_shape_*`（此前只认裁剪类），形态异常现在触发 L1 标注与说明卡
+- **P3-① bestofn 尾部数字误吞**：goal 末尾数字 >8 时不再被当 N（`/bestofn 修复 bug 42` 的 "42" 保留在 goal）
+- **P3-② VerifierPanel 死代码**：删除与 panelLogic 重复且未使用的本地 extract()/BADGE_LABELS
+- **P3-③ history 记录失真**：evaluate_session 补真实 duration_ms（原恒 0）；progress_start 不再写空 scores 数组
+- **P3-⑥ 提示词/工具描述缺新 action**：verifierUsageSection 与工具描述补 decompose/evaluate_session
+- **P3-⑦ 桥层静默 DEFAULT_CRITERIA**：select/compare 桥 handler 改为显式报错（TS/service 层本就强制 criteria，堵直连桥残留）；新增线程池背压（>200 排队立即报 BridgeOverload 错误响应，防直连洪水）
+- 工具描述补 decompose/evaluate_session 用法
+
+### Changed
+- **build.sh 与 CI 对齐**：本地构建补 panelLogic.ts 独立编译到 lib/client/（此前只有 CI 编译，本地 `npm test` 会用陈旧面板逻辑产物）
+- docs：PROGRESS.md/PLAN.md/ROADMAP.md 同步到 v0.6.1 实况（版本号、测试数、已偿债项）
+
+### Security
+- 桥层 criteria 缺省不再静默替换（U-N1 连坐项收口）：直连桥的调用方必须显式传 criteria
+
 ## [0.6.1] - 2026-08-24
 
 ### Fixed

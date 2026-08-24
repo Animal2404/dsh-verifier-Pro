@@ -60,11 +60,15 @@ class BridgeClient:
 def main() -> int:
     client = BridgeClient()
 
+    # v0.7.0: 显式模型——裸桥没有 TS 层的 defaultModel 注入，缺省模型会落到
+    # 官方包默认（Vertex/deepseek-chat），在 OpenAI 兼容后端上必然失败。
+    model = os.environ.get("OPENAI_MODEL") or "deepseek-v4-flash-vision-exp"
+
     ping = client.call("ping")
     print("ping:", json.dumps(ping.get("result") or ping.get("error"), ensure_ascii=False))
 
     # ProgressTracker flow in one bridge process.
-    start = client.call("progress_start", {"problem": "Write a function that reverses a string."})
+    start = client.call("progress_start", {"problem": "Write a function that reverses a string.", "model": model})
     tid = (start.get("result") or {}).get("tracker_id")
     print("progress_start:", json.dumps(start.get("result") or start.get("error")))
     if tid:
@@ -91,6 +95,7 @@ def main() -> int:
         "criteria": {"Correctness": "Does the code actually reverse the string?"},
         "n_evaluations": 1,
         "pivots": 2,
+        "model": model,
     })
     print("select:", json.dumps(sel.get("result") or sel.get("error")))
 

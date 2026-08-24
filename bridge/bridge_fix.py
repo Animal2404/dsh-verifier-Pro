@@ -142,6 +142,22 @@ _TAG_FAILURES: dict[str, int] = {}
 _DEGRADED_MODELS: set[str] = set()
 _STATE_LOCK = threading.Lock()
 
+# P2-4: 降级模型的 live 复核探测是真实计费调用（max_tokens 4096-8192）。
+# 每次评分尝试都触发一次 = 用户反复重试 N 次就白烧 N 次探测费。加时间窗：
+# 探测后 TTL 秒内对同一模型直接返回 fail-closed，不再重复探测。
+_DEGRADED_PROBE_TS: dict[str, float] = {}
+_DEGRADED_PROBE_TTL = 300  # seconds
+
+def _degraded_recheck_due(model: str) -> bool:
+    """True when a live recheck is due for a degraded model (throttled)."""
+    import time as _time
+    with _STATE_LOCK:
+        last = _DEGRADED_PROBE_TS.get(model, 0.0)
+        due = (_time.time() - last) >= _DEGRADED_PROBE_TTL
+        if due:
+            _DEGRADED_PROBE_TS[model] = _time.time()
+        return due
+
 
 def _observe_score_tags(model: str, text: str) -> None:
     """Called after every literal-mc scoring reply. Tag present -> clear the
@@ -452,6 +468,15 @@ def probe_model_v2(client, model: str) -> dict[str, Any]:
         if mode == "degraded":
             # 审查 #1：降级模型做 live 标签复核——恢复则清除降级回到 literal-mc，
             # 复核仍无标签则明确报错（ok=false → TS 门禁拒绝评分，fail-closed）。
+            # P2-4：复核节流——TTL 内不重复探测（探测是 4096+ token 的真实调用，
+            # 用户反复重试时每次评分尝试都触发一次会白烧探测费）。
+            if not _degraded_recheck_due(model):
+                result["score_mode"] = "degraded"
+                result["logprobs_error"] = (
+                    f"model {model} is DEGRADED: {MAX_TAG_FAILURES} consecutive scoring "
+                    "replies without <score_X> tags (live recheck throttled). Use a "
+                    "logprobs-capable model, or wait and re-probe.")
+                return result
             emission = _probe_tag_emission(client, resolved, model)
             result["tag_emission"] = emission
             if emission and emission.get("score_A") and emission.get("score_B"):

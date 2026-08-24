@@ -169,42 +169,67 @@ async function main() {
     return { usage: r.usage };
   }));
 
-  // #8 select N=5 接近分差 — 自动升级（前二名分差需落在 (0.03, 0.15] 噪声带）
+  // #8 select N=5 接近分差 — 升级/诚实平局双通道验收。
+  // 校准说明（v0.7.0）：旧断言把 flat 一律判失败——但两名领先候选本质等价时，
+  // 诚实输出就是 flat（无排名信号），这正是产品协议的行为。新判定：
+  //   degraded/unstable → 失败；flat → 用 compare 复核前二名，compare 亦平/无
+  //   信号 = 真实等价 → 通过（flat-confirmed-tie）；有清晰胜者 → 正常通过。
   results.push(await runTest('#8 select N=5 接近分差升级', async () => {
     // 第一组：A/B 质量接近（期望升级），C/D/E 明显更差（拉开整体梯度）
-    const attempt = async () => runner('select', {
+    const palindromes = [
+      'def is_pal(s):\n    return s == s[::-1]  # clean one-liner, handles all cases',
+      'def is_pal(s):\n    i, j = 0, len(s) - 1\n    while i < j:\n        if s[i] != s[j]:\n            return False\n        i += 1\n        j -= 1\n    return True  # two-pointer, correct and clear',
+      'def is_pal(s):\n    return list(s) == list(reversed(s))  # correct but allocates two lists',
+      'def is_pal(s):\n    return s[0] == s[-1]  # only checks first and last char, wrong for most inputs',
+      'def is_pal(s):\n    raise NotImplementedError  # broken stub',
+    ]
+    const factorialSet = [
+      'def fact(n):\n    return 1 if n <= 1 else n * fact(n - 1)  # textbook recursion',
+      'def fact(n):\n    result = 1\n    for i in range(2, n + 1):\n        result *= i\n    return result  # iterative, robust for deep n',
+      'from math import prod\ndef fact(n):\n    return prod(range(1, n + 1))  # library-based, correct',
+      'def fact(n):\n    if n == 0: return 1\n    return n * fact(n)  # infinite recursion, wrong',
+      'def fact(n):\n    return "hello"  # nonsense output',
+    ]
+    let candSet = palindromes
+    let r = await runner('select', {
       problem: 'Rate these five Python functions that check if a string is a palindrome',
-      candidates: [
-        'def is_pal(s):\n    return s == s[::-1]  # clean one-liner, handles all cases',
-        'def is_pal(s):\n    i, j = 0, len(s) - 1\n    while i < j:\n        if s[i] != s[j]:\n            return False\n        i += 1\n        j -= 1\n    return True  # two-pointer, correct and clear',
-        'def is_pal(s):\n    return list(s) == list(reversed(s))  # correct but allocates two lists',
-        'def is_pal(s):\n    return s[0] == s[-1]  # only checks first and last char, wrong for most inputs',
-        'def is_pal(s):\n    raise NotImplementedError  # broken stub',
-      ],
+      candidates: candSet,
       criteria: { Correctness: 'Correct palindrome check', Efficiency: 'Reasonable complexity' },
       model: 'deepseek-v4-pro',
-    });
-    let r = await attempt();
+    })
     // 若第一组前二名恰好落入 flat 带（≤0.03），重试一组微调过的候选
     if (r.signal === 'flat') {
+      candSet = factorialSet
       r = await runner('select', {
         problem: 'Rate these five Python implementations of a factorial function',
-        candidates: [
-          'def fact(n):\n    return 1 if n <= 1 else n * fact(n - 1)  # textbook recursion',
-          'def fact(n):\n    result = 1\n    for i in range(2, n + 1):\n        result *= i\n    return result  # iterative, robust for deep n',
-          'from math import prod\ndef fact(n):\n    return prod(range(1, n + 1))  # library-based, correct',
-          'def fact(n):\n    if n == 0: return 1\n    return n * fact(n)  # infinite recursion, wrong',
-          'def fact(n):\n    return "hello"  # nonsense output',
-        ],
+        candidates: candSet,
         criteria: { Correctness: 'Correct factorial', Style: 'Code quality' },
         model: 'deepseek-v4-pro',
-      });
+      })
     }
-    if (r.signal === 'flat') throw new Error(`No signal (all ≤0.03 apart): ${JSON.stringify(r.scores)}`);
-    if (r.escalated === true) {
-      if (r.k_used < 2) throw new Error(`k_used should be >= 2, got ${r.k_used}`);
+    if (r.signal === 'degraded') throw new Error('degraded：批量评分失败被 on_error=tie 掩蔽（全 0.5 特征）');
+    if (r.signal === 'unstable') throw new Error(`unstable：多次评估方向不一致 ${JSON.stringify(r.initial ?? r.reps ?? {})}`);
+    if (r.signal !== 'flat') {
+      if (r.escalated === true && r.k_used < 2) throw new Error(`k_used should be >= 2, got ${r.k_used}`);
+      return { index: r.index, escalated: r.escalated, k_used: r.k_used, signal: r.signal ?? 'significant', scores: r.scores };
     }
-    return { index: r.index, escalated: r.escalated, k_used: r.k_used, signal: r.signal ?? 'significant', scores: r.scores };
+    // flat = 诚实"前二名不可分"。按协议用 compare 复核前二名：
+    //   compare 亦平/无信号 → 真实等价，通过（flat-confirmed-tie）；
+    //   compare 给出明确胜者（分差 >0.15 且方向一致）→ select 失真，失败。
+    const order = (Array.isArray(r.scores) ? r.scores : []).map((v, i) => [Number(v), i]).sort((a, b) => b[0] - a[0]);
+    if (order.length < 2 || !Number.isFinite(order[0][0])) throw new Error(`flat 但缺少可复核分数: ${JSON.stringify(r.scores)}`);
+    const c = await runner('compare', {
+      problem: 'Which of these two Python functions is better?',
+      candidate_a: candSet[order[0][1]],
+      candidate_b: candSet[order[1][1]],
+      criteria: { Correctness: 'Correct implementation', Quality: 'Overall code quality' },
+      model: 'deepseek-v4-pro',
+    });
+    const diff = Math.abs(Number(c.reward_a) - Number(c.reward_b));
+    if (Number.isFinite(diff) && diff > 0.15) {
+      throw new Error(`select 判前二名平局，但 compare 给出明确胜者（diff=${diff.toFixed(3)}）——信号失真`);
+    }
+    return { index: r.index, escalated: false, k_used: c.k_used ?? 1, signal: 'flat-confirmed-tie', scores: r.scores };
   }));
 
   // #9 升级结果缓存命中 — 相同调用第二次 cached:true

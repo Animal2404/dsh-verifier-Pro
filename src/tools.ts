@@ -17,6 +17,7 @@
 import type { Context } from 'cordis'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { existsSync, unlinkSync } from 'node:fs'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { LRUCache, Semaphore } from './concurrency.js'
@@ -32,6 +33,17 @@ const LOOSE_OBJECT_SCHEMA = {
   additionalProperties: true,
   properties: {},
 } as const
+
+/**
+ * 稳定候选标签（用户反馈：连续多轮评选时 A/B/C 字母标会换指代——第二轮的
+ * "A" 到底是第一轮的谁无从判断）。标签 = 候选文本 sha256 前 8 位十六进制：
+ * 同一候选在任何一轮评估里都是同一个标签，不同候选必不同；跨轮拼子集时
+ * 按标签即可对回原始身份。
+ */
+export function candTag(text: unknown): string {
+  const s = typeof text === 'string' ? text : JSON.stringify(text) ?? ''
+  return createHash('sha256').update(s).digest('hex').slice(0, 8)
+}
 
 /** Below this margin a score pair counts as flat (handled by existing logic). */
 const FLAT_EPSILON = 0.03
@@ -113,6 +125,41 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
     }
   }
   return trimmed
+}
+
+/**
+ * 深度导向内置 criteria 预设：通用 Correctness/Completeness/Clarity 三件套
+ * 奖励广度、惩罚洞察——LLM 评委天然偏袒「面面俱到的浅层候选」，压过
+ * 「钉死根因的深刻候选」。这些预设把评分标准显式锚定到 根因+证据 上，
+ * 是对「team 分析看似很多、实则浮于表面」的结构性对策（协议层，非提示词恳求）。
+ * 官方包不认识这些名字，因此在进桥前展开成描述对象。
+ */
+const CRITERIA_PRESETS: Record<string, Record<string, string>> = {
+  deep_review: {
+    RootCause: 'Does it identify the ACTUAL root cause, pinning its specific location (code excerpt / log line / metric / step number)? Restating symptoms, or a generic list of possible causes without one pinned location, scores LOW.',
+    Evidence: 'Are the key claims backed by QUOTED evidence — exact code lines, raw command output, measured numbers — rather than paraphrase? Any load-bearing claim without a quotable anchor scores LOW.',
+    FailureModes: 'Name at least one NON-OBVIOUS edge case or failure mode (races, resource limits, security, encoding…) AND show concretely how the design handles it. A bare "edge cases are handled" claim with no named instance scores LOW.',
+    Tradeoffs: 'Name the STRONGEST alternative approach and explain concretely why it loses. "Tradeoffs were considered" without naming one scores LOW.',
+    Actionability: 'Are the next steps executable AND verifiable exactly as written (precise change, precise check)? Generic advice ("add more tests", "improve error handling") scores LOW.',
+  },
+  root_cause: {
+    RootCause: 'Does it identify the ACTUAL root cause, pinning its specific location (code excerpt / log line / metric / step reference)? Symptom restatement scores LOW.',
+    Evidence: 'Are the key claims backed by QUOTED evidence rather than paraphrase?',
+    Impact: 'Does it assess what the defect actually breaks, for whom, and how badly?',
+  },
+}
+
+/** Expand built-in criteria preset names ("deep_review" / "root_cause") into
+ * description objects. Called at the top of runSelect/runCompare — the single
+ * choke point shared by sync tools, async task_start, the service seam and
+ * /bestofn — so the presets work on EVERY path. Unknown names pass through
+ * unchanged (official package presets like terminal_bench still work). */
+export function expandCriteria(criteria: Criteria | undefined): Criteria | undefined {
+  if (typeof criteria === 'string') {
+    const preset = CRITERIA_PRESETS[criteria.trim()]
+    if (preset) return { ...preset }
+  }
+  return criteria
 }
 
 /**
@@ -211,6 +258,21 @@ function clamp01(value: unknown): { value: number; clamped: boolean } {
   return { value: c, clamped: c !== n }
 }
 
+/** P2-2: clamp a single numeric `score` result (progress_update) — exported
+ * for offline regression. Mirrors the multi-score clamp used elsewhere:
+ * out-of-range rewards are clipped and flagged as an anomaly so the caller
+ * never mistakes a compromised score for a clean one. */
+export function clampSingleScore(result: Record<string, unknown>): void {
+  if (result && typeof result.score === 'number') {
+    const c = clamp01(result.score)
+    if (c.clamped) {
+      result.anomaly = 'score_out_of_range'
+      result.warning = `⚠️ 评分返回越界分已裁剪到 [0,1]（raw: ${String(result.score)}）—— 疑似评分模型异常或被注入，请人工复核。`
+    }
+    result.score = c.value
+  }
+}
+
 /**
  * 异常分数形态检测（自研护栏——受 CompassVerifier「C=INVALID 响应」理念启发，
  * 但实现维度不同：它检测响应文本（截断/重复/拒绝），这里检测分数数字形态，
@@ -252,6 +314,36 @@ export interface EscalationDeps {
    * scorings → provider rate-limit storms + cost spikes. Undefined = unbounded.
    */
   scoringGate?: Semaphore
+  /** #11: hard USD budget per verification (0/unset = unlimited). Enforced by
+   * estimating spend from real persisted durations × configured rates before
+   * each scoring call. Lives on EscalationDeps so runSelect/runCompare guard
+   * EVERY path (sync tools, async task_start, service seam, /bestofn) — the
+   * old tool-handler-only guard let async tasks spend unbounded. */
+  maxCostPerVerification?: number
+  costPer1kInputTokens?: number
+  costPer1kOutputTokens?: number
+}
+
+/** #11: reject a scoring call when recent real spend × rates already exceeds
+ * the configured budget. kind-specific (select/compare/track have different
+ * per-call costs). Called from runSelect/runCompare/track — the single choke
+ * points every path flows through. */
+async function costGuard(deps: EscalationDeps, kind: 'select' | 'compare' | 'track'): Promise<void> {
+  const maxCost = deps.maxCostPerVerification
+  const costInRate = deps.costPer1kInputTokens ?? 0
+  const costOutRate = deps.costPer1kOutputTokens ?? 0
+  if (!maxCost || maxCost <= 0 || (costInRate <= 0 && costOutRate <= 0)) return
+  const recent = deps.store.readHistory(20)
+    .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
+  if (recent.length === 0) return
+  const medianMs = recent.map((r) => r.duration_ms as number).sort((a, b) => a - b)[Math.floor(recent.length / 2)]
+  // 粗估：1 秒 ≈ 300 input token + 100 output token（保守量级），按费率折现。
+  const rate = (300 * costInRate + 100 * costOutRate) / 1000
+  const estUsd = (medianMs / 1000) * rate
+  const spentUsd = (recent.reduce((s, r) => s + (r.duration_ms as number), 0) / 1000) * rate
+  if (spentUsd + estUsd > maxCost) {
+    throw new Error(`verifier 成本预算拦截：本次估算 ~$${estUsd.toFixed(4)}，累计 ~$${spentUsd.toFixed(4)} 超预算 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
+  }
 }
 
 /**
@@ -285,12 +377,15 @@ async function gatedRequest<T>(
   return deps.scoringGate ? deps.scoringGate.run(exec, signal) : exec()
 }
 
-/** Median duration of recent scoring calls, from persisted history. */
-async function estimateCallMs(deps: EscalationDeps): Promise<number> {
-  const durs = deps.store.readHistory(50)    .map((r) => r.duration_ms)
-    .filter((d): d is number => typeof d === 'number' && d > 0)
+/** Median duration of recent scoring calls OF THE SAME KIND, from persisted
+ * history (P2-3: mixing select/track durations into a compare budget skewed
+ * the estimate — select tournaments are ~4× slower than compares). */
+async function estimateCallMs(deps: EscalationDeps, kind: 'select' | 'compare'): Promise<number> {
+  const durs = deps.store.readHistory(50)
+    .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
+    .map((r) => r.duration_ms as number)
     .sort((a, b) => a - b)
-  if (!durs.length) return 60_000
+  if (!durs.length) return kind === 'select' ? 37_000 : 11_000
   return durs[Math.floor(durs.length / 2)]
 }
 
@@ -298,6 +393,9 @@ async function estimateCallMs(deps: EscalationDeps): Promise<number> {
 async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: AbortSignal): Promise<Record<string, unknown>> {
   // F15: bound the cost-scaling knob (single choke point for every path).
   p.n_evaluations = boundParam(p.n_evaluations, MAX_N_EVALUATIONS)
+  // 深度预设：criteria 名称（deep_review/root_cause）在此统一展开——
+  // 同步工具/异步 task_start/服务缝/bestofn 全路径共用这一处。
+  p.criteria = expandCriteria(p.criteria)
   // 传输层加固：候选/问题过 sanitize（长度上限 + 控制符剥离 + 注入短语中性化）。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeA = sanitizeForVerifier(p.candidate_a)
@@ -311,6 +409,9 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     ...(p.n_evaluations !== undefined ? { n_evaluations: p.n_evaluations } : {}),
     ...(p.images ? { images: p.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
   })
+  // 稳定候选标签：跨轮评估时 A/B 字母会换指代，内容哈希标签不变。
+  const tagA = candTag(p.candidate_a)
+  const tagB = candTag(p.candidate_b)
 
   // F4: images participate in cache identity — different images must never
   // share an entry within the LRU TTL (cross-result contamination).
@@ -320,6 +421,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   // Escalated composite cache first (repeat calls hit this without new API spend).
   const escCached = resultCache.get(baseKey + ':esc')
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
+
+  // #11: budget guard lives here (not the tool handler) so async task_start,
+  // the service seam and /bestofn — all of which flow through runCompare —
+  // are covered too.
+  await costGuard(deps, 'compare')
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
   const k1 = await cached(baseKey + ':k1', () =>
@@ -354,6 +460,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     if (compareExactFlat) {
       return {
         ...k1,
+        tag_a: tagA,
+        tag_b: tagB,
         cached: k1WasCached,
         escalated: false,
         signal: 'degraded',
@@ -362,28 +470,43 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
     const mc = literalMcNotes(k1.score_mode, marginBefore)
+    // P1-2: the flat branch must MERGE k1's anomaly/clip warning instead of
+    // replacing it with the generic flat text (select's flat branch already
+    // merged; compare used to clobber the ⚠️ warning the model and panel rely
+    // on to distrust a clipped score).
+    let flatWarning = k1.warning
+    if (mc.warning) flatWarning = flatWarning ? `${flatWarning}；${mc.warning}` : mc.warning
     return {
       ...k1,
+      tag_a: tagA,
+      tag_b: tagB,
       cached: k1WasCached,
       escalated: false,
       // 审查 #4: flat/degraded 结果也携带耗时（用户需要知道花了多久）。
       duration_ms: Date.now() - started,
       // 审查 #6: literal-mc 采样路径的成本/置信提示（临界分差建议 logprobs 复核）。
       ...(mc.note ? { note: mc.note } : {}),
-      ...(mc.warning ? { warning: typeof k1.warning === 'string' ? `${k1.warning}；${mc.warning}` : mc.warning } : {}),
-      ...(flat ? { signal: 'flat', warning: '两候选得分相同或接近，无可靠信号，建议细化标准或人工复核' } : {}),
+      ...(flatWarning !== undefined ? { warning: flatWarning } : {}),
+      ...(flat
+        ? {
+            signal: 'flat',
+            warning: flatWarning
+              ? `${flatWarning} 且：两候选得分相同或接近，无可靠信号，建议细化标准或人工复核`
+              : '两候选得分相同或接近，无可靠信号，建议细化标准或人工复核',
+          }
+        : {}),
     }
   }
 
   // Budget watermark: estimate upgrade cost from real persisted durations.
-  const est = await estimateCallMs(deps)
+  const est = await estimateCallMs(deps, 'compare')
   const avail = deps.budgetMs() - (Date.now() - started)
   const extraAffordable = Math.floor((avail * 0.9) / Math.max(est, 1000))
   const extraReps = Math.min(deps.esc.maxEscalateK - 1, extraAffordable)
   if (extraReps < 1) {
     // U-B3: budget-skip must land in history — estimateCallMs reads this file.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
-    return { ...k1, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
+    return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
   // Extra reps with manual slot alternation (even reps swap, rewards swapped back).
@@ -418,7 +541,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       if (reps.length < 2) {
         const msg = error instanceof Error ? error.message : String(error)
         deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'escalation_failed' })
-        return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${msg}` }
+        return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${msg}` }
       }
       process.stderr.write(`[verifier-brain] escalation rep ${i} failed, continuing with ${reps.length} reps: ${error instanceof Error ? error.message : String(error)}\n`)
       break
@@ -443,6 +566,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       signal: 'unstable',
       escalated: true,
       k_used: kUsed,
+      tag_a: tagA,
+      tag_b: tagB,
       message: '多次评估胜者不一致，信号不稳定，建议人工复核',
       ...(anyAnomaly ? { anomaly: 'reward_out_of_range', warning: anomalyWarning } : {}),
       // 审查 #6: literal-mc 采样在临界分差下尤其不稳——如实标注路径与建议。
@@ -459,6 +584,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     reward_b: avg('reward_b'),
     escalated: true,
     k_used: kUsed,
+    tag_a: tagA,
+    tag_b: tagB,
     margin_before: marginBefore,
     margin_after: Math.abs(avg('reward_a') - avg('reward_b')),
     consistency: `${agreeing}/${kUsed}${agreeing < kUsed ? '，建议谨慎参考' : ''}`,
@@ -499,6 +626,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   p.n_evaluations = boundParam(p.n_evaluations, MAX_N_EVALUATIONS)
   p.pivots = boundParam(p.pivots, MAX_PIVOTS)
   p.max_workers = boundParam(p.max_workers, MAX_MAX_WORKERS)
+  // 深度预设：同 runCompare。
+  p.criteria = expandCriteria(p.criteria)
   // 传输层加固：问题与每个候选过 sanitize。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeCandidates = p.candidates.map((c) => sanitizeForVerifier(c))
@@ -529,6 +658,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // settles — success, error, or early return. %TEMP% used to accumulate one
   // orphan file per invocation (escalation created a second one).
   const tempCacheFiles: string[] = [selectCachePath]
+  // 稳定候选标签：跨轮拼子集时字母换指代的问题（用户反馈）——按内容哈希对回身份。
+  const candTags = p.candidates.map((c) => candTag(c))
   const cleanupTempCaches = (): void => {
     for (const file of tempCacheFiles) {
       try {
@@ -541,6 +672,11 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
 
   const escCached = resultCache.get(baseKey + ':esc')
   if (escCached) return { ...(await escCached as Record<string, unknown>), cached: true }
+
+  // #11: budget guard lives here (not the tool handler) so async task_start,
+  // the service seam and /bestofn — all of which flow through runSelect —
+  // are covered too.
+  await costGuard(deps, 'select')
 
   const k1WasCached = resultCache.has(baseKey + ':k1')
   const k1 = await cached(baseKey + ':k1', () =>
@@ -584,6 +720,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     if (exactFlat) {
       return {
         ...k1,
+        tags: candTags,
         cached: k1WasCached,
         escalated: false,
         signal: 'degraded',
@@ -596,6 +733,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       // 不能被平局文案覆盖（此前全挤极端的分被 flat 分支吞掉警告）。
       return {
         ...k1,
+        tags: candTags,
         cached: k1WasCached,
         escalated: false,
         signal: 'flat',
@@ -607,6 +745,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     const mc = literalMcNotes(k1.score_mode, marginBefore)
     return {
       ...k1,
+      tags: candTags,
       cached: k1WasCached,
       escalated: false,
       // 审查 #6: literal-mc 采样路径的成本/置信提示。
@@ -615,13 +754,17 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     }
   }
 
-  // One tournament pass cost ~= elapsed; total-3 needs ~2 more passes.
+  // One tournament pass cost ~= elapsed; the escalated tournament runs
+  // n_evaluations=escK passes. P1-3: honor the CONFIGURED K — the old code
+  // hardcoded 3 and silently ignored maxEscalateK on the select path (only
+  // compare respected it). K=1 would not be an "escalation" at all.
+  const escK = Math.max(2, Math.min(deps.esc.maxEscalateK, MAX_N_EVALUATIONS))
   const elapsed = Date.now() - started
   const avail = deps.budgetMs() - elapsed
-  if (avail < elapsed * 2 * 1.1 || deps.esc.maxEscalateK < 3) {
+  if (avail < elapsed * escK * 1.1 || deps.esc.maxEscalateK < 2) {
     // U-B3: budget-skip must land in history — estimateCallMs reads this file.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
-    return { ...k1, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
+    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
   let escalated: Record<string, unknown>
@@ -635,12 +778,18 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     const escCachePath = join(tmpdir(), `llv-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
     tempCacheFiles.push(escCachePath)
     const escModel = deps.esc.escalationModel ?? p.model
+    // P1-3: escalate with the CONFIGURED K (was hardcoded 3).
+    // P2-1: the escalation rep must NOT reuse the caller's seed — the official
+    // tournament shuffles with the same RNG, so a shared seed would make the
+    // "independent re-evaluation" trivially correlated with k1.
+    const escParams = mkParams(escK)
+    delete escParams.seed
     escalated = await gatedRequest<Record<string, unknown>>(deps, 'select',
-      { ...mkParams(3), ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
+      { ...escParams, ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
   } catch (error) {
     // U-B3: degraded-to-k1 is still a real scored call — log it.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
-    return { ...k1, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
+    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
 
   // R3-2: clamp escalated scores IMMEDIATELY (before the unstable branch) —
@@ -664,7 +813,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     return {
       signal: 'unstable',
       escalated: true,
-      k_used: 3,
+      k_used: escK,
+      tags: candTags,
       message: '两次评估第一名不一致，信号不稳定，建议人工复核',
       ...(k1.anomaly !== undefined ? { anomaly: k1.anomaly, warning: k1.warning } : {}),
       ...(escalated.anomaly !== undefined ? { anomaly: escalated.anomaly, warning: escalated.warning } : {}),
@@ -691,7 +841,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     ...escalated,
     scores: averaged,
     escalated: true,
-    k_used: 3,
+    k_used: escK,
+    tags: candTags,
     ...(tiered ? { escalation_model: deps.esc.escalationModel, note: '分级评分：升级结果来自更强模型，未与首评平均' } : {}),
     margin_before: marginBefore,
     margin_after: marginAfter,
@@ -787,6 +938,9 @@ export function createEscalationRunner(deps: EscalationDeps) {
       fallThroughParams.steps = (fallThroughParams.steps as unknown[])
         .map((s) => (typeof s === 'string' ? sanitizeForVerifier(s) : s))
     }
+    // #11: track via task_start / service seam must respect the budget too
+    // (runSelect/runCompare guard themselves; the fall-through does not).
+    if (method === 'track') await costGuard(deps, 'track')
     const raw = await gatedRequest<Record<string, unknown>>(deps, method, fallThroughParams)
     // D-4: track/progress results are scores too — the async task path and
     // the service seam used to return them RAW (unclamped), letting
@@ -980,6 +1134,15 @@ function warnText(w: unknown): string {
   return s.startsWith('⚠️') ? s : `⚠️ ${s}`
 }
 
+/** 候选分数渲染：有标签时逐个显示「字母·tag=分」，跨轮身份可对回；无标签
+ * （旧数据/进度类）退回 JSON。 */
+function renderTaggedScores(scores: unknown, tags: unknown): string {
+  if (!Array.isArray(scores)) return JSON.stringify(scores)
+  const tagList = Array.isArray(tags) ? tags as unknown[] : null
+  if (!tagList) return JSON.stringify(scores)
+  return scores.map((s, i) => `${'ABCDEFGH'[i] ?? i + 1}·${String(tagList[i] ?? '?')}=${s}`).join('  ')
+}
+
 function renderResult(value: Record<string, unknown>): { type: 'text'; text: string } {
   let prefix = ''
   if (value.escalated === true && value.k_used !== undefined) {
@@ -994,9 +1157,9 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
   if (value.signal === 'flat') {
     const secs = typeof value.duration_ms === 'number' ? ` ⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : ''
     if (value.reward_a !== undefined) {
-      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${secs}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}${value.tag_a ? ` [${String(value.tag_a)}]` : ''}\nreward_b=${value.reward_b}${value.tag_b ? ` [${String(value.tag_b)}]` : ''}${secs}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
     }
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${renderTaggedScores(value.scores, value.tags)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
   }
   if (value.index !== undefined || value.ranking !== undefined) {
     // 审查 #4: 展示真实耗时；大候选数时提示异步路径（select 中位 ~37.8s）。
@@ -1005,7 +1168,7 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
     const asyncHint = n !== null && n >= 8
       ? `\n💡 ${n} 候选锦标赛耗时较大，可改用 task_start 异步执行（select 中位 ~37.8s）`
       : ''
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${JSON.stringify(value.scores)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n${warnText(value.warning)}` : ''}${asyncHint}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${renderTaggedScores(value.scores, value.tags)}\nRanking: ${JSON.stringify(value.ranking)}${typeof value.warning === 'string' ? `\n${warnText(value.warning)}` : ''}${asyncHint}` }
   }
   if (value.reward_a !== undefined) {
     const flags = [
@@ -1018,7 +1181,7 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
       // a silently-clipped score must never render as a clean green result.
       typeof value.warning === 'string' ? warnText(value.warning) : null,
     ].filter(Boolean).join(', ')
-    return { type: 'text', text: `${prefix}reward_a=${value.reward_a}\nreward_b=${value.reward_b}${flags ? `\n[${flags}]` : ''}` }
+    return { type: 'text', text: `${prefix}reward_a=${value.reward_a}${value.tag_a ? ` [${String(value.tag_a)}]` : ''}\nreward_b=${value.reward_b}${value.tag_b ? ` [${String(value.tag_b)}]` : ''}${flags ? `\n[${flags}]` : ''}` }
   }
   if (value.tracker_id !== undefined && value.score === undefined && value.closed === undefined) {
     return { type: 'text', text: `tracker_id: ${value.tracker_id}` }
@@ -1042,25 +1205,6 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
   // F6: prefer the shared gate from index.ts so tool calls, async tasks,
   // /bestofn and the service seam all draw from one concurrency budget.
   const scoringGate = options.scoringGate ?? new Semaphore(options.maxConcurrentScoring ?? 4)
-  // #11: 真实成本预算守卫——用 history 的真实耗时 × 配置费率估算本调用成本，
-  // 超预算则拒绝（诚实实现，不再是无效果的预留配置）。
-  const maxCost = options.maxCostPerVerification
-  const costInRate = options.costPer1kInputTokens ?? 0
-  const costOutRate = options.costPer1kOutputTokens ?? 0
-  const costGuard = async (kind: 'select' | 'compare' | 'track'): Promise<void> => {
-    if (!maxCost || maxCost <= 0 || (costInRate <= 0 && costOutRate <= 0)) return
-    const recent = store.readHistory(20)
-      .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
-    if (recent.length === 0) return
-    const medianMs = recent.map((r) => r.duration_ms as number).sort((a, b) => a - b)[Math.floor(recent.length / 2)]
-    // 粗估：1 秒 ≈ 300 input token + 100 output token（保守量级），按费率折现。
-    const estUsd = (medianMs / 1000) * (300 * costInRate + 100 * costOutRate) / 1000
-    const spent = recent.reduce((s, r) => s + (r.duration_ms as number), 0) / 1000
-    const spentUsd = spent * (300 * costInRate + 100 * costOutRate) / 1000
-    if (spentUsd + estUsd > maxCost) {
-      throw new Error(`verifier 成本预算拦截：本次估算 ~$${estUsd.toFixed(4)}，累计 ~$${spentUsd.toFixed(4)} 超预算 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
-    }
-  }
   const deps: EscalationDeps = {
     getBridge,
     store,
@@ -1074,13 +1218,18 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
     },
     budgetMs: () => syncBudgetMs ?? 300_000,
     scoringGate,
+    // #11: 成本预算挂进 deps —— costGuard 在 runSelect/runCompare/track 内
+    // 统一调用，同步工具 / 异步 task_start / 服务缝 / /bestofn 全路径生效。
+    maxCostPerVerification: options.maxCostPerVerification,
+    costPer1kInputTokens: options.costPer1kInputTokens,
+    costPer1kOutputTokens: options.costPer1kOutputTokens,
   }
 
   ctx.effect(() => {
     const dispose = ctx.tools.register(defineTool({
       name: 'verifier',
       description:
-        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory; returns checkpoint scores — count may be fewer than steps, official prefix-scoring semantics), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads — select can take ~40s, compare ~11s, so async avoids blocking), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
+        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory; returns checkpoint scores — count may be fewer than steps, official prefix-scoring semantics), decompose (deep-review a trajectory: step summaries + failure classification + check questions for manual verification), evaluate_session (track + structured export: checkpoint table, trend, JSONL-ready string), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads — select can take ~40s, compare ~11s, so async avoids blocking), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; decompose/evaluate_session: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
       parameters: {
         action: {
           type: 'string',
@@ -1100,7 +1249,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         params: { type: 'string', description: 'JSON object string with the method arguments. task_start.' },
         task_id: { type: 'string', description: 'From task_start. task_status.' },
         wait_seconds: { type: 'number', description: 'Block up to N seconds (cap 300) for task completion; recommended 120. task_status.' },
-        criteria: { type: 'string', description: 'Preset name (e.g. "terminal_bench") or JSON object string like {"Correctness":"..."}. select/compare.' },
+        criteria: { type: 'string', description: 'Preset name (e.g. "terminal_bench") or JSON object string like {"Correctness":"..."}. Built-in depth presets: "deep_review" (root cause + evidence over coverage), "root_cause". select/compare.' },
         model: { type: 'string', description: 'Verifier model id; defaults to the configured backend model.' },
         n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion (default 1; hard cap 8).' },
         pivots: { type: 'number', description: 'Tournament pivots (default 2; more = more accurate, more costly; hard cap 20). select.' },
@@ -1147,7 +1296,6 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
         }
         switch (args.action) {
           case 'select': {
-            await costGuard('select')
             if (!args.problem) throw new Error('verifier select requires `problem`')
             if (!args.candidates?.length) throw new Error('verifier select requires `candidates`')
             if (!args.criteria) throw new Error('verifier select requires `criteria`')
@@ -1166,7 +1314,6 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             return asToolResult(result)
           }
           case 'compare': {
-            await costGuard('compare')
             if (!args.problem) throw new Error('verifier compare requires `problem`')
             if (typeof args.candidate_a !== 'string') throw new Error('verifier compare requires `candidate_a`')
             if (typeof args.candidate_b !== 'string') throw new Error('verifier compare requires `candidate_b`')
@@ -1198,6 +1345,8 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             // Hoist after guards: TS drops property narrowing inside closures.
             const trackProblem = args.problem as string
             const trackSteps = args.steps as string[]
+            // #11: sync track goes through the same budget guard as select/compare.
+            await costGuard(deps, 'track')
             // R3-4: track text is model-visible scoring input — same transport
             // hardening as select/compare (length cap, control-char strip,
             // injection neutralization). R3-3: n_evaluations goes through the
@@ -1256,6 +1405,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             // 步骤数组（团队/调用方提供轨迹）。
             if (!args.problem) throw new Error('verifier evaluate_session requires `problem`')
             if (!args.steps?.length) throw new Error('verifier evaluate_session requires `steps`')
+            const esStarted = Date.now()
             const esProblem = args.problem as string
             const esSteps = args.steps as string[]
             const esExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('track', {
@@ -1289,7 +1439,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               trend,
               summary: scores.length ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)) : 0,
             }
-            store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: esProblem, model, scores, duration_ms: 0 })
+            store.appendHistory({ ts: new Date().toISOString(), kind: 'track', problem: esProblem, model, scores, duration_ms: Date.now() - esStarted })
             return asToolResult({ ...raw, export: exportable, export_jsonl: JSON.stringify(exportable) })
           }
           case 'progress_start': {
@@ -1306,7 +1456,9 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               ...(args.images ? { images: args.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(psExec, signal) : psExec())
-            store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', problem: args.problem, model, tracker_id: result.tracker_id as string, scores: [] })
+            // P3-3: progress_start confirms a tracker — it produces no score,
+            // so history must not record a misleading empty scores array.
+            store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', problem: args.problem, model, tracker_id: result.tracker_id as string })
             return asToolResult(result)
           }
           case 'progress_update': {
@@ -1321,6 +1473,10 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               step: sanitizeForVerifier(puStep),
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(puExec, signal) : puExec())
+            // P2-2: progress scores are rewards too — the P0-5 invariant
+            // (clamp + anomaly flag) must cover progress_update like every
+            // other numeric score (previously returned raw, bypassing clamp).
+            clampSingleScore(result)
             store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', tracker_id: args.tracker_id, step: args.step, model, scores: [result.score] })
             return asToolResult(result)
           }
