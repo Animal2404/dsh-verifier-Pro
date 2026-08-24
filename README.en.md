@@ -73,11 +73,19 @@ environment** — adjust these two lines to match your own credentials:
 > `deepseek-v4-pro` remains available but is **lowest priority** (expensive; use only when
 > the cheaper verified models are unavailable or for escalation-tier scoring).
 > ⚠️ `deepseek-v4-flash` (without vision-exp) rejects logprobs requests (DFLASH 400) — it
-> works only via the literal-mc path above; plain `hy3` is unsupported entirely.
+> works only via the literal-mc path above.
+>
+> Profile self-healing (fail-closed): a literal-mc model that emits no score tags for
+> 3 consecutive replies is marked DEGRADED — scoring is refused instead of silently
+> mis-scored; a passing probe recheck restores it automatically.
 
 Your chosen model must return **logprobs** — that's the foundation of fine-grained rewards.
-Verify with `node scripts/probe_logprobs.py <model>`, or batch-scan candidates via
-`python scripts/scan_logprob_models.py <your-key>`.
+Verify with (Windows; macOS/Linux use `.venv/bin/python`):
+
+```sh
+.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>
+.venv/Scripts/python scripts/scan_logprob_models.py <your-key>
+```
 
 ## Usage
 

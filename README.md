@@ -80,18 +80,20 @@ bash scripts/build.sh
 | `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
-> 📌 **模型评分路径（v0.6.1）**：
+> 📌 **模型评分路径（现行）**：
 > - **logprobs 路径（精确）**：`deepseek-v4-flash-vision-exp`（默认）、`qwen3.7-plus`、`qwen3.6-plus`。
 > - **literal-mc 路径（采样近似，模型不返回 logprobs 时的降级）**：`minimax-m3`、`minimax-m2.7`、
 >   `mimo-v2.5-pro`、`muse-spark-1.2-contributor`、`deepseek-v4-flash`（桥自动路由，见下）。
 > - `deepseek-v4-flash` 本身仍不接受 logprobs 请求（DFLASH 400），但桥会**自动走 literal-mc
 >   采样评分**（无 logprobs 直调 + 读评分标签 + K 次采样平均），因此可用——不再是「勿用」。
+> - **档案自愈（fail-closed）**：literal-mc 模型连续 3 次未输出评分标签即判 DEGRADED——拒绝评分
+>   而非静默错评；probe 复核通过可自动恢复。
 >
 > 要求：logprobs 路径的模型必须支持 **token 级 logprobs 返回**（细粒度 reward 的根基）。
 > literal-mc 路径的模型则要求能按提示词输出 `<score_X>` 字母标签（桥自动探测/按档案路由）。
 > 面板会标注本次评分用的是哪条路径；精细判别建议用 logprobs 模型。
 >
-> **默认模型判别力实测（v0.6.1，A/B 对照）**：默认的 `deepseek-v4-flash-vision-exp`
+> **默认模型判别力实测（2026-08-23，A/B 对照）**：默认的 `deepseek-v4-flash-vision-exp`
 > 与 `deepseek-v4-pro` 在粗判别（sumTo 循环 vs 公式）、细判别（fib 递归 vs 迭代，
 > 双方均正确）、中文判别（中文实现+中文 criteria）三个任务上**方向判定全部一致且正确**，
 > flash-vision-exp 的 margin 甚至更大（0.46/0.49/0.31 vs 0.35/0.41/0.21）。
@@ -171,8 +173,9 @@ node scripts/describe_visual.mjs <screenshot.png>    # 五维视觉描述（色�
 node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选自述" vs "运行时观察（非候选自述）"
 ```
 
-- 支持的产物类型（评审收窄）：**HTML**（CDP 开屏 + 控制台错误 + N 帧 update + 截图）与
-  **Node.js**（child_process + 退出码 + stdout/stderr）；其余标记为实验性。
+- 支持的产物类型：**HTML**（CDP 开屏 + 控制台错误 + N 帧 update + 截图）与
+  **Node.js**（.js/.mjs/.cjs，child_process + 退出码 + stdout/stderr）；其他类型
+  （.md/.txt 等）标记为 ⏭️ **unsupported 跳过**（不执行、不计失败，v0.7.0 起）。
 - 崩溃候选（smoke `ok:false`）**直接出局，不参与评分**——verifier 只消费带证据的幸存者。
 - 证据块明确区分"功能摘要（候选自述）"与"运行时/视觉观察（非候选自述）"，防止自述污染评分。
 
@@ -205,9 +208,9 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxWorkers` | `4` | 桥内并发 worker |
 | `stateDir` | `~/.dsh/verifier-brain` | 持久化目录（history/tasks JSONL） |
 | `promptSection` | `true` | 注入使用策略到 system prompt |
-| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 起已实现预算拦截**（0.6.1 延续）：基于 history 真实耗时×费率估算，超预算拒绝 |
+| `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 起已实现预算拦截**：基于 history 真实耗时×费率估算，超预算拒绝；**v0.7.0 起覆盖全部评分路径**（同步 select/compare/track、异步 task_start、服务缝、/bestofn） |
 | `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），预算拦截的费率输入 |
-| `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算（预留） |
+| `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算 |
 
 ### 配置详解（这个文件是干嘛的、怎么改）
 
@@ -258,7 +261,7 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 | `compare`（两两对比） | 59 | **10.8s** | 1.9–72.3s | 单次评分；分差落噪声带会自动升级 K=3，耗时会放大 |
 | `select`（N 候选排名） | 23 | **37.8s** | 2.7–117.5s | PPT 锦标赛；3 候选 n=1 pivots=2 约 30-40s |
 | `track`（轨迹评分） | 2 | **2.6s** | 1.6–2.6s | 短轨迹 |
-| `decompose`（分解验证） | 实测 | **30–65s** | — | 输出长（步骤摘要+错误分类+核查问题），max_tokens 4096 |
+| `decompose`（分解验证） | 实测 | **30–65s** | — | 输出长（步骤摘要+错误分类+核查问题），max_tokens 8192 |
 
 **影响耗时的因素**：
 - `n_evaluations`（每候选评分次数，默认 1）→ 线性放大
