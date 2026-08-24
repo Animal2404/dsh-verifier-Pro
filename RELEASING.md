@@ -61,6 +61,7 @@ gh release edit v0.5.0 --title "v0.5.0 — <一句话概括>"
 发布前检查以下三份文档与当前代码一致：
 
 - **README.md / README.en.md**：模型推荐、配置示例、action 数量、engines 声明
+- **新增能力必须有对应章节**（v0.7.0 教训）：先跑 `git diff <上个tag>..HEAD --stat` 列出本版新增的命令/字段/协议，逐项确认两份 README 都有使用说明——"核对旧内容是否过期"防不住遗漏型错误（/vselftest、双轨协议、稳定标签发版时整体缺席文档，被用户抓到）
 - **LICENSE**：BSD-3-Clause（与 package.json license 字段一致）
 - **SECURITY.md**：安全声明与实现一致（历史教训：sanitizeForVerifier 曾虚报——文档必须如实）
 
