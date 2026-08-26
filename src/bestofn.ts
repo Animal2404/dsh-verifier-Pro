@@ -15,9 +15,10 @@
  */
 import type { Context } from 'cordis'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PythonBridge } from './bridge.js'
@@ -44,11 +45,25 @@ function runEvidenceChain(
   timeoutMs = 10 * 60_000,
 ): Promise<{ code: number; stdout: string }> {
   return new Promise((resolvePromise) => {
-    // vselftest-m4：候选路径先绝对化——spawn 已钉 cwd=pluginRoot，相对路径
-    // 若原样转发会在子进程里解析到错误位置。
+    // B16: 候选已在 handler 按会话工作区绝对化（N7 resolveFrom），此处的 resolve()
+    // 对绝对路径是防御性 no-op——保留它以防未来其他调用方传入相对路径。
     const absArtifacts = artifacts.map((a) => resolve(a))
     const args = [...absArtifacts, '--out', outDir]
-    for (const [name, text] of summaries) args.push('--summary', `${name}=${text}`)
+    const tmpFiles: string[] = []
+    for (const [name, text] of summaries) {
+      // B17: 超长 summary 会撞 Windows argv 上限（~32K 字符）→ 落临时文件，
+      // 以 `@file:<path>` 前缀引用（build_evidence 侧解引用）。
+      if (text.length > 6000) {
+        try {
+          const tmp = join(tmpdir(), `bestofn-summary-${process.pid}-${Math.random().toString(36).slice(2, 8)}.txt`)
+          writeFileSync(tmp, text, 'utf8')
+          tmpFiles.push(tmp)
+          args.push('--summary', `${name}=@file:${tmp}`)
+          continue
+        } catch { /* 落盘失败则回退内联 */ }
+      }
+      args.push('--summary', `${name}=${text}`)
+    }
     let child: ReturnType<typeof spawn>
     try {
       // vselftest-m4（加固）：显式钉 cwd——四个进程的 resolve() 身份哈希依赖
@@ -90,9 +105,13 @@ function runEvidenceChain(
       // F9: on Windows child.kill() yields signal=null — a boolean flag is the
       // only portable way to know we timed out (smoke.mjs does the same).
       const timedOutNote = timedOut ? `\n[evidence_chain killed after ${timeoutMs}ms timeout]` : ''
+      for (const t of tmpFiles) { try { rmSync(t, { force: true }) } catch { /* best-effort */ } }
       finish({ code: timedOut ? 124 : (code ?? 1), stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + timedOutNote })
     })
-    child.on('error', (e) => finish({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` }))
+    child.on('error', (e) => {
+      for (const t of tmpFiles) { try { rmSync(t, { force: true }) } catch { /* best-effort */ } }
+      finish({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` })
+    })
   })
 }
 
@@ -110,14 +129,15 @@ function readEvidence(outDir: string): Array<{ name: string; text: string }> {
   }
 }
 
-/** Read per-candidate smoke status from evidence chain output dir. */
-function smokeOk(outDir: string, name: string): boolean | undefined {
+/** F-G/N2: 读取完整冒烟记录（区分 ok=false / kind=unsupported / 缺失）。 */
+function smokeRecord(outDir: string, name: string): { ok?: boolean; kind?: string } | undefined {
   const file = join(outDir, 'smoke', `${name}.smoke.json`)
   if (!existsSync(file)) return undefined
   try {
-    return JSON.parse(readFileSync(file, 'utf8')).ok === true
+    return JSON.parse(readFileSync(file, 'utf8')) as { ok?: boolean; kind?: string }
   } catch (e) {
-    process.stderr.write(`[bestofn] ${name}.smoke.json 解析失败（按 unknown 处理）: ${e instanceof Error ? e.message : String(e)}\n`)
+    // B7/m11: 损坏的 smoke.json 不再静默当 missing——记录在盘但不可读，给出诊断
+    process.stderr.write(`[bestofn] ${name}.smoke.json 解析失败（记录在盘但损坏，按 unknown 处理）: ${e instanceof Error ? e.message : String(e)}\n`)
     return undefined
   }
 }
@@ -138,19 +158,29 @@ function smokeOk(outDir: string, name: string): boolean | undefined {
  */
 /** 导出供测试（P1-① 声明-证据对照的机械核对逻辑）。 */
 export function crossCheckClaimEvidence(blockText: string): string | null {
+  // m9 结论：段头锚点保持字面全称——格式漂移的检测由 tests/audit-contract.test.mjs
+  // 契约③ 守护（CI 中断言 build_evidence 标题与此处正则同字面），此处不留模糊容忍
+  // （容忍会把冒烟捕获组移位，静默破坏核对）。
   const summaryMatch = /## 功能摘要（候选自述）\r?\n([\s\S]*?)\r?\n## 运行时观察/.exec(blockText)
   const smokeMatch = /## 运行时观察（冒烟测试，非候选自述）\r?\n([\s\S]*?)(?:\r?\n## |$)/.exec(blockText)
   const summary = summaryMatch ? summaryMatch[1].trim() : ''
   const smoke = smokeMatch ? smokeMatch[1].trim() : ''
   if (!summary || !smoke) return null // 缺段无法核对（unknown 已排除）
 
-  const hasSmokeEvidence = !smoke.includes('(无冒烟证据)')
-  const smokeFailed = smoke.includes('冒烟: ❌') || /退出码: [1-9]/.test(smoke) || smoke.includes('错误:')
-  const smokeHasErrors = /错误:|❌/.test(smoke)
+  // F-H: 原始 stdout/stderr 尾片段是任意日志文本，其中出现"错误:"/"退出码: 1"/
+  // "❌" 会伪造声明-证据矛盾——扫描只针对结构化行，剔除这两类原始尾巴。
+  // （build_evidence 已把尾内容换行转义为 ⏎，整条尾巴只有一行，此处剥离即可完整剔除。）
+  const smokeScan = smoke.split(/\r?\n/).filter((l) => !/^(stdout|stderr)\(尾\):/.test(l)).join('\n')
+
+  const hasSmokeEvidence = !smokeScan.includes('(无冒烟证据)')
+  const smokeFailed = smokeScan.includes('冒烟: ❌') || /退出码: [1-9]/.test(smokeScan) || smokeScan.includes('错误:')
+  const smokeHasErrors = /错误:|❌/.test(smokeScan)
 
   // 1) 负面自述 vs 通过证据
   if (hasSmokeEvidence && !smokeFailed) {
-    const negativeClaims = /(失败|不工作|未实现|无法|报错|不能|没有实现|有 bug|不完整)/.test(summary)
+    // B8: 收窄负面词——"未实现 X"/"无法"/"报错"等常出现在诚实自述的逐特性说明里，
+    // 裸匹配会惩罚真话；只命中「整体否定」形态（全部/整体失败、启动即崩、有 bug 等）。
+    const negativeClaims = /(全部|整体|整个|核心)(失败|不可用|不能运行|无法工作)|完全失败|直接报错|启动即(崩溃|报错)|根本(不能|无法)(运行|工作)|有 bug|功能不完整|没有(做出来|实现成功)/.test(summary)
     if (negativeClaims) {
       return '自述含负面断言（失败/未实现等），但冒烟通过且无错误——自述自我贬低与实际证据矛盾'
     }
@@ -170,13 +200,15 @@ export function crossCheckClaimEvidence(blockText: string): string | null {
 /** F16: /bestofn spawns one member per candidate — keep fan-out sane. */
 const MAX_BESTOFN_N = 8
 
-function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; n: number; nClamped: boolean } {
+/** 导出供测试（N3/F-B/N4/N6/F-I 的参数解析回归）。 */
+export function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<string, string>; quick: boolean; local: boolean; n: number; nClamped: boolean; nSource: 'explicit' | 'trailing' | 'default' } {
   const tokens = rawInput.trim().split(/\s+/).filter(Boolean)
   const positionals: string[] = []
   const summaries = new Map<string, string>()
   let quick = false
   let local = false
   let n = 3
+  let nSource: 'explicit' | 'trailing' | 'default' = 'default'
   let nClamped = false
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]
@@ -188,11 +220,24 @@ function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<st
       // local/goal 判定（极端情况翻转成 team 模式拉起 N 个实现代理）。
       const parts: string[] = []
       let j = i + 1
-      while (j < tokens.length && !tokens[j].startsWith('-')) { parts.push(tokens[j]); j++ }
+      while (j < tokens.length && !tokens[j].startsWith('-')) {
+        // N6/F-F: 值在「看起来像文件路径」的 token 处停止——`--summary a=x y b.html`
+        // 不再把 b.html 吃进摘要（此前贪婪吞到 dash 才停，会把后续候选文件吞掉）。
+        // 扩展名必须以字母开头：'0.85'/'v1.2' 这类小数结尾不误断（'.85' 不是文件后缀）。
+        // B12: 首个 token 永不按文件形中断——`--summary a=README.md` 整体是摘要值。
+        if (j > i + 1 && (/[\\/]/.test(tokens[j]) || /\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(tokens[j]))) break
+        parts.push(tokens[j])
+        j++
+      }
       const pair = parts.join(' ')
       const eq = pair.indexOf('=')
       if (eq > 0) {
-        summaries.set(pair.slice(0, eq).trim(), pair.slice(eq + 1))
+        // F-I: name 与 value 都 trim——`--summary name = text` 不再把前导空格转发给 build_evidence
+        const sname = pair.slice(0, eq).trim()
+        const sval = pair.slice(eq + 1).trim()
+        // N9: 重复 key 静默后者覆盖——给出警告，避免用户以为两个候选各自有自述
+        if (summaries.has(sname)) process.stderr.write(`[bestofn] --summary 重复 key 覆盖: ${sname}（后者覆盖前者）\n`)
+        summaries.set(sname, sval)
       } else {
         // M-C：'='@0（空名）或无 '=' —— 拒收并告警。空名值曾以 '=text'
         // 形态落到 build_evidence 的 global 兜底，把单个候选的自述盖到全部候选。
@@ -205,34 +250,50 @@ function parseArgs(rawInput: string): { positionals: string[]; summaries: Map<st
       // vselftest-M4：仅在接受合法值时前进——此前无条件 i++ 会静默吞掉
       // 紧随其后的候选文件（'/bestofn a.html -n b.html c.html' 丢 b.html）。
       const val = Number(tokens[i + 1])
-      if (Number.isFinite(val) && val > 0) {
+      // N4: 必须是正整数——`-n 0.5` 此前 Math.floor(0.5)=0 → "spawn exactly 0 members"
+      // B11: 仅接受十进制数字——`-n 0x10`(=16)/`-n 1e2`(=100) 不再被静默接受
+      if (/^\d+$/.test(tokens[i + 1] ?? '') && Number.isInteger(val) && val > 0) {
         n = Math.min(Math.floor(val), MAX_BESTOFN_N)
         if (Math.floor(val) > MAX_BESTOFN_N) nClamped = true
+        nSource = 'explicit'
         i++
       } else {
-        process.stderr.write(`[bestofn] -n 忽略无效值: ${tokens[i + 1] ?? '(缺省)'}\n`)
+        process.stderr.write(`[bestofn] -n 忽略无效值（需要正整数）: ${tokens[i + 1] ?? '(缺省)'}\n`)
       }
       continue
     }
     // 尾部 [N]：团队模式允许 "goal... N" 形式——纯数字的最后一个 positional 当 N。
     // P3-1: 只在 N ≤ MAX_BESTOFN_N（8）时吞掉——goal 文本以数字结尾时
     // （如 "/bestofn 修复 bug 42"），42 > 8 会保留在 goal 里，不再被误吞为 N。
+    // m10/B10: 其余 positional 全像文件（扩展名/路径分隔符）时不吞——尾数更可能
+    // 是用户误给的候选数而非目标文本，留给 handler 的救援逻辑处理。
     if (i === tokens.length - 1 && /^\d+$/.test(tok) && !local && positionals.length > 0) {
       const val = Number(tok)
-      if (val > 0 && val <= MAX_BESTOFN_N) { n = Math.min(Math.floor(val), MAX_BESTOFN_N); continue }
+      const restAreFiles = positionals.every((p) => /[\\/]/.test(p) || /\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(p))
+      if (val > 0 && val <= MAX_BESTOFN_N && !restAreFiles) {
+        n = Math.min(Math.floor(val), MAX_BESTOFN_N)
+        nSource = 'trailing'
+        continue
+      }
     }
     positionals.push(tok)
   }
-  return { positionals, summaries, quick, local, n, nClamped }
+  return { positionals, summaries, quick, local, n, nClamped, nSource }
 }
 
 /** Build the follow-up activation directive that starts the team fan-out protocol. */
-export function buildBestOfNActivation(goal: string, n: number): string {
+export function buildBestOfNActivation(goal: string, n: number, summaries?: Map<string, string>, quick?: boolean): string {
+  const extras: string[] = []
+  if (quick) extras.push('（用户指定 --quick：优选后直接给冠军，跳过整合建议）')
+  if (summaries && summaries.size) {
+    extras.push(`（用户提供的候选自述 --summary：${[...summaries.entries()].map(([k, v]) => `${k}=${v.slice(0, 60)}`).join(' ; ')}）`)
+  }
+  const extrasLine = extras.length ? `\n${extras.join('\n')}` : ''
   return [
     'The user invoked the `/bestofn` command. Activate the Best-of-N optimal-selection protocol from your instructions now: you are the captain of a multi-agent team.',
     `Goal: ${goal}`,
     `Candidate count: ${n} (spawn exactly ${n} members, each delivering a COMPLETE independent implementation of the goal — never split the task into aspects per member).`,
-    '',
+    extrasLine,
     'Run the full loop:',
     '1. agent_teams: create team, add N members, assign each the SAME task (complete implementation).',
     '2. Collect N artifacts (each member saves its deliverable to a path).',
@@ -255,18 +316,84 @@ export function registerBestOfNCommand(ctx: Context, deps: {
     description: 'Best-of-N optimal selection: give a goal (spawns N members, evidence chain, select, merge and gate) or file paths (scores existing artifacts)',
     input: { hint: '<goal> [N]   |   <file1> <file2> ...   |   --quick' },
     async handler(invocation) {
-      const { positionals, summaries, quick, local: explicitLocal, n, nClamped } = parseArgs(invocation.rawInput)
+      const { positionals, summaries, quick, local: explicitLocal, n, nClamped, nSource } = parseArgs(invocation.rawInput)
+
+      // N7: 相对路径锚定到会话工作区（用户真实 cwd），而非 host 进程 cwd——
+      // host cwd 是 DSH 安装目录，相对路径在那里解析会落到错误位置。
+      const baseDir = invocation.agent.session?.header?.cwd || process.cwd()
+      const resolveFrom = (p: string): string => (isAbsolute(p) ? p : resolve(baseDir, p))
+
+      // N3/F-C + B10/m10: 尾部数字救援——`/bestofn a.html b.html 9` 或 `/bestofn a.html 5`，
+      // 尾数是纯数字且前序全部是已存在文件时，意图显然是本地对比：弹出数字按本地处理，
+      // 而非翻转成 team 模式跑一个"文件名+数字"的垃圾 goal。parseArgs 已在「其余全像
+      // 文件」时拒绝吞掉尾数，这里兜底处理全部漏网形态。
+      let trailingN = ''
+      const lastTok = positionals.length ? positionals[positionals.length - 1] : ''
+      if (!explicitLocal && positionals.length >= 2 && /^\d+$/.test(lastTok)) {
+        const rest = positionals.slice(0, -1)
+        if (rest.every((p) => existsSync(resolveFrom(p)))) {
+          trailingN = lastTok
+          positionals.pop()
+        }
+      }
 
       // 智能模式判定：全部 positional 是存在的文件（≥2 个）→ 本地对比；否则视为目标文字
-      const local = explicitLocal || (positionals.length >= 2 && positionals.every((p) => existsSync(resolve(p))))
-      const artifacts = local ? positionals : []
+      let local = explicitLocal || (positionals.length >= 2 && positionals.every((p) => existsSync(resolveFrom(p))))
+
+      // F-C/N3 + B2: 打错文件名守卫——≥1 个已存在文件 + 缺失项全部形似路径 → 报错，
+      // 而不是翻转成 team 模式拉起 N 个代理跑一个"文件名"goal。「2 文件错 1」是最常见
+      // 场景：只有 1 个存在文件，此前 existing.length>=2 使守卫失效。
+      if (!local && !explicitLocal && positionals.length >= 2) {
+        const existing = positionals.filter((p) => existsSync(resolveFrom(p)))
+        const missing = positionals.filter((p) => !existsSync(resolveFrom(p)))
+        const looksPath = (p: string) => /[\\/]/.test(p) || /\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(p)
+        if (existing.length >= 1 && missing.length >= 1 && missing.every(looksPath)) {
+          return {
+            kind: 'error',
+            text: `/bestofn: 以下候选路径不存在（疑似文件名打错）: ${missing.join(', ')}\n本地对比需要全部候选文件都存在；若确实要以文本为目标跑团队模式，请避免使用形如文件路径的词。`,
+          }
+        }
+      }
+
+      // B20: 单个已存在文件路径不是合法团队目标（会 spawn N 个代理实现一个文件名）
+      if (!local && !explicitLocal && positionals.length === 1) {
+        const only = positionals[0]
+        if (existsSync(resolveFrom(only)) && (/[\\/]/.test(only) || /\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(only))) {
+          return {
+            kind: 'error',
+            text: `/bestofn: 单个候选文件（${only}）无法对比——本地对比需要至少两个文件；若想跑团队模式请给文字目标。`,
+          }
+        }
+      }
+
+      // m7: 本地模式去重候选路径——`/bestofn a.html a.html` 不再产生同名冒烟互相覆盖
+      const artifacts = local ? [...new Set(positionals)] : []
       const goal = local ? '' : positionals.join(' ')
+
+      if (local && trailingN) {
+        process.stderr.write(`[bestofn] 尾部数字 ${trailingN} 在本地对比模式下忽略（候选数参数仅团队模式有效）\n`)
+      }
 
       // vselftest-M-D（入口守卫）：目录候选会以"目录名+哈希"铸造幽灵证据块，
       // 目录内文件被冒烟却永不参与排名（DH-F1，交叉审阅定级 major）。本地模式
       // 明确拒绝并给出展开指引，而不是让用户收到误导性的零幸存者错误。
       if (local) {
-        const dirPos = artifacts.filter((p) => { try { return statSync(resolve(p)).isDirectory() } catch { return false } })
+        // F-B: 显式 --local 下纯数字不是候选文件——拒绝而非生成幻影候选
+        const numeric = artifacts.filter((p) => /^\d+$/.test(p))
+        if (numeric.length) {
+          return {
+            kind: 'error',
+            text: `/bestofn: 本地对比不接受纯数字候选: ${numeric.join(', ')}\n（尾部数字 N 仅团队模式有效；本地对比直接给文件路径即可）`,
+          }
+        }
+        const missingArtifacts = artifacts.filter((p) => !existsSync(resolveFrom(p)))
+        if (missingArtifacts.length) {
+          return {
+            kind: 'error',
+            text: `/bestofn: 候选文件不存在: ${missingArtifacts.join(', ')}`,
+          }
+        }
+        const dirPos = artifacts.filter((p) => { try { return statSync(resolveFrom(p)).isDirectory() } catch { return false } })
         if (dirPos.length) {
           return {
             kind: 'error',
@@ -286,12 +413,17 @@ export function registerBestOfNCommand(ctx: Context, deps: {
       // 团队模式：followup 激活指令，让模型作为队长跑完整优选协议
       if (!local) {
         invocation.agent.followup(createUserMessage({
-          content: [{ type: 'text', text: buildBestOfNActivation(goal, n) }],
+          // B15: --summary/--quick 透传给队长（此前静默丢弃）
+          content: [{ type: 'text', text: buildBestOfNActivation(goal, n, summaries, quick) }],
           source: { kind: 'user' },
         }))
+        // B1: 尾部数字被吞为 N 时显式告警——目标截断不再静默发生
+        const nWarn = nSource === 'trailing'
+          ? `\n⚠️ 尾部数字已作为候选数 N=${n}——若它是目标文本的一部分（如"做 3 个页面"），请改用 -n ${n} 显式指定候选数。`
+          : ''
         return {
           kind: 'success',
-          text: `/bestofn activated — the captain will spawn ${n} members implementing: ${goal}${nClamped ? `\n⚠️ 请求的候选数超过上限，已截到 ${n}（MAX_BESTOFN_N=8）` : ''}`,
+          text: `/bestofn activated — the captain will spawn ${n} members implementing: ${goal}${nClamped ? `\n⚠️ 请求的候选数超过上限，已截到 ${n}（MAX_BESTOFN_N=8）` : ''}${nWarn}`,
         }
       }
 
@@ -305,8 +437,14 @@ export function registerBestOfNCommand(ctx: Context, deps: {
 
       // 每次运行独立子目录：防同名候选覆盖与陈旧证据背书（审计 P1-2/P1-4）
       const outDir = join(deps.store.stateDir, 'bestofn', new Date().toISOString().replace(/[:.]/g, '-'))
-      // 1) 证据链（冒烟→视觉→拼接）
-      const chain = await runEvidenceChain(artifacts, summaries, outDir)
+      // B13: bestofn/ 输出目录只增不减——保留最近 20 个运行，其余清理
+      try {
+        const bestofnRoot = join(deps.store.stateDir, 'bestofn')
+        const olds = readdirSync(bestofnRoot).filter((d) => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d{3}Z)?$/.test(d)).sort()
+        for (const d of olds.slice(0, Math.max(0, olds.length - 20))) rmSync(join(bestofnRoot, d), { recursive: true, force: true })
+      } catch { /* best-effort */ }
+      // 1) 证据链（冒烟→视觉→拼接）——N7: 候选已按会话工作区绝对化
+      const chain = await runEvidenceChain(artifacts.map(resolveFrom), summaries, outDir)
       const blocks = readEvidence(outDir)
       if (blocks.length === 0) {
         return {
@@ -314,20 +452,32 @@ export function registerBestOfNCommand(ctx: Context, deps: {
           text: `/bestofn: 证据链未产出有效结果。\n${chain.stdout.slice(0, 500)}`,
         }
       }
+      // B4: 链未完整完成（超时 124 / 非零退出）但已有部分证据 → 报告必须显式标注，
+      // 不能把部分候选集静默当完整集排名。
+      const chainNote = chain.code !== 0
+        ? `\n⚠️ 证据链未完整完成（exit code ${chain.code}${chain.code === 124 ? '：被超时终止' : ''}）——以下结果基于部分证据，仅供参考。`
+        : ''
 
       // 2) 崩溃候选出局；U-N14 三态化：smoke 记录缺失 = unknown，排除出
       // 排名而不是默认幸存——基础设施失败（如 Chrome 缺失）时淘汰保证不再静默失效。
-      const smokeState = (name: string): 'ok' | 'crashed' | 'unknown' => {
-        const ok = smokeOk(outDir, name)
-        return ok === true ? 'ok' : ok === false ? 'crashed' : 'unknown'
+      // F-G/N2: unsupported（on-disk 但未执行）与 missing 分开标注——此前两者
+      // 混用同一句"无冒烟记录"，unsupported 记录明明存在于盘上。
+      const smokeState = (name: string): 'ok' | 'crashed' | 'unknown' | 'unsupported' => {
+        const rec = smokeRecord(outDir, name)
+        if (rec?.ok === true) return 'ok'
+        if (rec?.ok === false) return 'crashed'
+        if (rec?.kind === 'unsupported') return 'unsupported'
+        return 'unknown'
       }
       const crashed = blocks.filter((b) => smokeState(b.name) === 'crashed')
       const unknownSmoke = blocks.filter((b) => smokeState(b.name) === 'unknown')
+      const unsupportedSmoke = blocks.filter((b) => smokeState(b.name) === 'unsupported')
       const survivors = blocks.filter((b) => smokeState(b.name) === 'ok')
 
       const crashLines = (): string => {
         const parts: string[] = []
         if (crashed.length) parts.push(`❌ 崩溃出局: ${crashed.map((c) => c.name).join(', ')}`)
+        if (unsupportedSmoke.length) parts.push(`⏭️ 类型不支持（未执行，不计入排名）: ${unsupportedSmoke.map((c) => c.name).join(', ')}`)
         if (unknownSmoke.length) parts.push(`❓ 无冒烟记录（不计入排名）: ${unknownSmoke.map((c) => c.name).join(', ')}`)
         return parts.join('\n')
       }
@@ -335,13 +485,13 @@ export function registerBestOfNCommand(ctx: Context, deps: {
       if (survivors.length === 0) {
         return {
           kind: 'error',
-          text: `/bestofn: 没有通过冒烟验证的候选，无法排名。\n${crashLines()}`,
+          text: `/bestofn: 没有通过冒烟验证的候选，无法排名。\n${crashLines()}${chainNote}`,
         }
       }
       if (survivors.length === 1) {
         return {
           kind: 'success',
-          text: `/bestofn: 仅一个候选存活（${survivors[0].name}），直接为冠军。\n${crashLines()}`.trim(),
+          text: `/bestofn: 仅一个候选存活（${survivors[0].name}），直接为冠军。\n${crashLines()}${chainNote}`.trim(),
         }
       }
 
@@ -411,12 +561,22 @@ export function registerBestOfNCommand(ctx: Context, deps: {
         lines.push(`## /bestofn 优选报告`)
         const crashInfo2 = crashLines()
         if (crashInfo2) lines.push(`\n${crashInfo2}`)
+        // B6: unknown 候选多为命名契约漂移信号（artifactName↔smokeRecord 零校验的补偿提示）
+        if (unknownSmoke.length > 0) {
+          lines.push(`\n⚠️ ${unknownSmoke.length} 个候选无冒烟记录——若候选文件确实存在，可能是 smoke.mjs ↔ build_evidence.mjs 的 artifactName 命名契约漂移，请核对两处哈希/命名逻辑一致性。`)
+        }
+        if (chainNote) lines.push(chainNote)
         lines.push(`\n🏆 冠军: ${champion}`)
-        lines.push(`排名: ${survivors.map((s, i) => `${i + 1}.${s.name} (${scores[i] !== undefined ? scores[i].toFixed(4) : '?'})`).join('  ')}`)
+        // B14: 排名按分数降序展示（此前按输入序编号，标签暗示排序却未排序）
+        const ranked = survivors
+          .map((s, i) => ({ name: s.name, score: scores[i] }))
+          .sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+        lines.push(`排名: ${ranked.map((r, i) => `${i + 1}.${r.name} (${r.score !== undefined ? r.score.toFixed(4) : '?'})`).join('  ')}`)
         // VAL 验证自主等级（P1-②）：幸存者都过了机器冒烟（ok=true）= 客观真值锚定 L2；
         // 但排名分本身仍是 LLM 判断（L0）。如实分层，用户可分辨「证据是机器证的，
         // 分数是模型评的」。
-        lines.push(`\n🔒 验证锚定: 证据 L2（冒烟=机器验证的客观真值）· 评分 L0（LLM 判断）`)
+        // B18: ok=true 只证明「加载/运行未崩溃」，行为正确性未证明——L2 表述加限定
+        lines.push(`\n🔒 验证锚定: 证据 L2（机器冒烟：确认加载/运行未崩溃；行为正确性未证明）· 评分 L0（LLM 判断）`)
         // P1-① 声明-证据对照结果（矛盾候选显式标注，警示用户勿轻信其自述）
         if (conflicting.length > 0) {
           lines.push(`\n🔍 声明×证据核对: ⚠️ ${conflicting.length} 个候选自述与冒烟证据矛盾——`)
@@ -451,9 +611,11 @@ export function registerBestOfNCommand(ctx: Context, deps: {
  * 这里只负责激活与注入目标范围。
  */
 export function buildSelfTestActivation(focusNote: string): string {
+  // B5: 冻结范围路径从 pluginRoot 派生——插件装到任何位置/平台都不再硬编码 E:\DeepSeek
+  const scope = `${join(pluginRoot, 'src', 'bestofn.ts')} and ${join(pluginRoot, 'scripts', 'smoke.mjs')}`
   return [
     'The user invoked `/vselftest`. Run the AUDIT TRACK of your Best-of-N protocol now (you are the captain of a multi-agent team).',
-    `Frozen scope (findings outside are rejected): E:\\DeepSeek\\dsh-verifier-brain\\src\\bestofn.ts and E:\\DeepSeek\\dsh-verifier-brain\\scripts\\smoke.mjs — focus: ${focusNote}`,
+    `Frozen scope (findings outside are rejected): ${scope} — focus: ${focusNote}`,
     'Anti-contamination: do NOT read AUDIT-*.md / CHANGELOG.md — only fresh findings from reading the actual source count; parroting known issues scores zero.',
     'N=2 lens-diverse members: member 1 = boldest defect-hunter (attack the design), member 2 = safest correctness-first (trace every code path). Every claim cites exact file:line PLUS a quoted snippet.',
     'You mechanically verify ≥30% of citations per report + ALL fatal findings via grep/read; a fabricated citation invalidates that finding and halves the member\'s weight. MANDATORY cross-review: each member names the other report\'s most fatal unsupported claim. Then verifier select("root_cause") over corrected reports, and deliver the final report labeling EVERY finding VERIFIED / REPORTED — no unlabeled findings ship.',
@@ -464,10 +626,10 @@ export function registerSelfTestCommand(ctx: Context): void {
   ctx.effect(() => ctx.commands.register({
     name: 'vselftest',
     description: 'One-click verifier self-test: AUDIT-track team review of the plugin\'s own bestofn↔smoke collaboration boundary',
-    input: { hint: '[focus note]  (optional — default: artifact-name hash ↔ smokeOk lookup, arg-parsing edges)' },
+    input: { hint: '[focus note]  (optional — default: artifact-name hash ↔ smokeRecord lookup, arg-parsing edges)' },
     async handler(invocation) {
       const focus = invocation.rawInput.trim()
-        || 'the collaboration boundary between smoke.mjs artifactName hashing and bestofn smokeOk lookup, plus bestofn parseArgs edge cases'
+        || 'the collaboration boundary between smoke.mjs artifactName hashing and bestofn smokeRecord lookup, plus bestofn parseArgs edge cases'
       invocation.agent.followup(createUserMessage({
         content: [{ type: 'text', text: buildSelfTestActivation(focus) }],
         source: { kind: 'user' },

@@ -91,10 +91,13 @@ export class VerifierStore {
    * Cap unbounded JSONL growth: after ROTATE_THRESHOLD appends, keep only the
    * most recent ROTATE_KEEP lines. A per-file append counter is O(1) and
    * line-accurate. Rewrite mirrors agent-teams state.js replaceFileAtomicOrDirect
-   * (deep-read 2026-08-23): atomic tmp+rename with up to 3 retries (50ms
-   * backoff) ONLY on retryable rename errors (EPERM/EACCES/EBUSY/EEXIST/
-   * ENOTEMPTY — Windows transient locks), then a content-equivalent direct
+   * (deep-read 2026-08-23): atomic tmp+rename, then a content-equivalent direct
    * write fallback; every path removes the temp file.
+   *
+   * F13（复盘 R-refcomp）：去掉 rename 失败后的 3×50ms 忙等重试——轮换发生在
+   * Node 主线程（appendHistory 由工具调用路径同步触发），忙等会停摆整个宿主事件
+   * 循环。Windows 瞬时锁下直接落内容等价的 direct write 回退（原路径本就有）：
+   * 最坏情况是本轮轮换没做成（计数已清零，2000 次追加后再试），追加本身不受影响。
    */
   private rotateIfNeeded(file: string): void {
     try {
@@ -110,24 +113,12 @@ export class VerifierStore {
       const content = kept.join('\n') + '\n'
       const tmp = `${file}.rot-${process.pid}-${Date.now()}`
       writeFileSync(tmp, content, 'utf8')
-      // agent-teams: retryable rename codes (Windows transient lock shapes).
-      const retryable = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY'])
       let renamed = false
-      for (let attempt = 0; attempt < 3 && !renamed; attempt++) {
-        try {
-          renameSync(tmp, file)
-          renamed = true
-          break
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code
-          if (code && retryable.has(code)) {
-            // 50ms backoff: give the briefly-locking owner time to finish.
-            const until = Date.now() + 50
-            while (Date.now() < until) { /* busy-wait */ }
-            continue
-          }
-          break // non-retryable error: fall through to direct write
-        }
+      try {
+        renameSync(tmp, file)
+        renamed = true
+      } catch {
+        // Windows transient lock or otherwise: fall through to direct write.
       }
       if (!renamed) {
         // agent-teams degraded path: content-equivalent direct write, then

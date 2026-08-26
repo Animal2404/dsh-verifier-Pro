@@ -41,6 +41,7 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TextIO
@@ -68,6 +69,24 @@ _TRACKERS: dict[str, Any] = {}
 _TRACKER_LOCKS: dict[str, threading.Lock] = {}
 _TRACKERS_GUARD = threading.Lock()
 _NEXT_TRACKER_ID = 1
+# v0.7.3（外部评审 #8）：ProgressTracker 只靠 progress_close 清理，agent 忘 close
+# （常见）→ 随桥进程寿命泄漏。TTL 兜底：每次新建时淘汰超过 1 小时的 tracker。
+# F5（复盘 R-refcomp）：TTL 基准改为「最近访问时间」——按创建时间计会把活跃使用
+# 超 1h 的长任务在下一次 progress_start 时误杀（随后 update 报 unknown tracker_id）。
+_TRACKER_LAST_SEEN: dict[str, float] = {}
+_TRACKER_TTL_S = 3600
+
+
+def _prune_trackers(now: float) -> None:
+    stale = [tid for tid, ts in _TRACKER_LAST_SEEN.items() if now - ts > _TRACKER_TTL_S]
+    for tid in stale:
+        _TRACKERS.pop(tid, None)
+        _TRACKER_LOCKS.pop(tid, None)
+        _TRACKER_LAST_SEEN.pop(tid, None)
+
+
+def _touch_tracker(tracker_id: str) -> None:
+    _TRACKER_LAST_SEEN[tracker_id] = time.time()
 
 # Worker count for concurrent request handling (env-overridable).
 _WORKERS = max(1, int(os.environ.get("VERIFIER_BRAIN_WORKERS", "4") or "4"))
@@ -110,6 +129,37 @@ def _jsonable(value: Any) -> Any:
 
 def _params(params: dict[str, Any] | None) -> dict[str, Any]:
     return dict(params or {})
+
+
+def _shape_warning(shapes: dict[str, int]) -> str | None:
+    """Human-readable warning for response-shape anomalies (counts included)."""
+    if not shapes:
+        return None
+    label = {"incomplete": "截断", "repetitive": "循环重复", "refusal": "拒绝回答"}
+    parts = [f"{label.get(s, s)}×{n}" for s, n in sorted(shapes.items())]
+    return f"⚠️ 评分模型输出形态异常（{'、'.join(parts)}）——分数不可信，请人工复核。"
+
+
+def _attach_scoring_observations(out: dict[str, Any], since: float) -> None:
+    """F3/F2（复盘 R-refcomp）：把本次调用窗口内的响应形态异常与 literal-mc 部分
+    丢标签事件挂到结果上。事件由官方包的内层 ThreadPoolExecutor 线程写入
+    （bridge_fix 进程级事件表），只有按 t0 窗口化 drain 才能跨线程回收——
+    旧的 thread-local 读法在 select / 多 job compare 上恒为 None（死代码）。
+
+    since = time.monotonic() 取自发起官方调用之前；并发请求窗口重叠时个别
+    事件可能跨请求互串（只影响告警，不影响分数）。"""
+    if bridge_fix is None:
+        return
+    msg = _shape_warning(bridge_fix.consume_response_events(since))
+    if msg:
+        out["anomaly"] = out.get("anomaly") or "response_shape_anomaly"
+        out["warning"] = f"{out['warning']}；{msg}" if out.get("warning") else msg
+    lost = bridge_fix.consume_partial_tag_losses(since)
+    if lost > 0:
+        out["anomaly"] = out.get("anomaly") or "literal_mc_partial_tag_loss"
+        pmsg = (f"⚠️ literal-mc：{lost} 个样本未返回完整 <score_X> 标签对，已按官方字面回退值 "
+                "0.5 计入均值——结果可能被稀释，建议换 logprobs 模型或人工复核。")
+        out["warning"] = f"{out['warning']}；{pmsg}" if out.get("warning") else pmsg
 
 
 def _filter_kwargs(kwargs: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
@@ -315,6 +365,10 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
     else:
         kwargs.setdefault("n_evaluations", 1)
     kwargs.setdefault("pivots", 2)
+    # F4（复盘 R-refcomp）：maxWorkers 只限桥请求层并发；官方包在 max_workers 缺省时
+    # 取 default_max_workers()=50/500 路直打供应商——单次 select 内部即可 ~200 在飞。
+    # 桥内 worker 数作为内层 fan-out 的默认钳制，显式传参仍可覆盖（TS 侧上限 16）。
+    kwargs.setdefault("max_workers", _WORKERS)
     _sanitize_images(kwargs, "select")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
@@ -322,6 +376,7 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
         "pivots", "seed", "max_workers", "model", "cache", "progress",
         "on_error", "client",
     })
+    _t0 = time.monotonic()
     result = llm_verifier.select(problem=problem, candidates=candidates, **kwargs)
     out = {
         "index": getattr(result, "index", None),
@@ -333,11 +388,7 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
         mode = bridge_fix.score_mode_for(str(kwargs["model"]))
         if mode in ("logprobs", "literal-mc"):
             out["score_mode"] = mode
-        # CompassVerifier C-class response-shape detection (②).
-        shape = bridge_fix.consume_response_shape()
-        if shape:
-            out["anomaly"] = f"response_shape_{shape}"
-            out["warning"] = f"⚠️ 评分模型输出形态异常（{shape}）：{'截断' if shape == 'incomplete' else '循环重复' if shape == 'repetitive' else '拒绝回答'}——分数不可信，请人工复核。"
+    _attach_scoring_observations(out, _t0)
     return _jsonable(out)
 
 
@@ -365,12 +416,15 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
     else:
         kwargs.setdefault("n_evaluations", 1)
+    # F4: see _handle_select — bound the inner fan-out too.
+    kwargs.setdefault("max_workers", _WORKERS)
     _sanitize_images(kwargs, "compare")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
         "criteria", "images", "ground_truth_note", "n_evaluations",
         "max_workers", "model", "client",
     })
+    _t0 = time.monotonic()
     reward_a, reward_b = llm_verifier.compare(problem, candidate_a, candidate_b, **kwargs)
     # Panel transparency (item ②): tag which scoring path produced the reward —
     # 'logprobs' (official) vs 'literal-mc' (sampled score-tag fallback).
@@ -379,13 +433,7 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         mode = bridge_fix.score_mode_for(str(kwargs["model"]))
         if mode in ("logprobs", "literal-mc"):
             out["score_mode"] = mode
-        # CompassVerifier C-class response-shape detection (②): a truncated /
-        # loop-repeating / refusal model output must surface as an anomaly —
-        # score numbers alone cannot see it.
-        shape = bridge_fix.consume_response_shape()
-        if shape:
-            out["anomaly"] = f"response_shape_{shape}"
-            out["warning"] = f"⚠️ 评分模型输出形态异常（{shape}）：{'截断' if shape == 'incomplete' else '循环重复' if shape == 'repetitive' else '拒绝回答'}——分数不可信，请人工复核。"
+    _attach_scoring_observations(out, _t0)
     return _jsonable(out)
 
 
@@ -404,14 +452,35 @@ def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
         kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
     else:
         kwargs.setdefault("n_evaluations", 1)
+    # F4: see _handle_select — bound the inner fan-out too.
+    kwargs.setdefault("max_workers", _WORKERS)
     _sanitize_images(kwargs, "track")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
         "images", "checkpoint_steps", "n_evaluations",
         "max_workers", "model", "client",
     })
+    _t0 = time.monotonic()
     result = llm_verifier.track(problem=problem, steps=steps, **kwargs)
-    return _jsonable({"scores": getattr(result, "scores", None)})
+    out = {
+        "scores": getattr(result, "scores", None),
+        # F9（复盘 R-refcomp）：透传官方 checkpoint 步号（默认内点 2..T-1，显式
+        # 传入时原样返回）——此前只回 scores，evaluate_session 导出表只能标
+        # i+1，与真实步号错位。
+        "checkpoint_steps": getattr(result, "steps", None),
+        # F6（复盘 R-refcomp）：官方对「某 checkpoint 全部 repeat 都不可读」静默记
+        # 0.5（progress.py:309-310）——整条轨迹全 0.5 时在桥侧先打上标记，TS 层
+        # 与面板才能区分「真实平局曲线」和「批量失败被掩蔽」。
+    }
+    scores = out["scores"]
+    if isinstance(scores, list) and scores and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) == 0.5 for v in scores
+    ):
+        out["anomaly"] = out.get("anomaly") or "exact_flat"
+        out["warning"] = ("⚠️ 全部 checkpoint 精确等于 0.5 —— 官方对不可读 checkpoint 静默记 0.5 "
+                          "的特征（评分批量失败/标签丢失），不是真实平局曲线；请人工复核或换模型。")
+    _attach_scoring_observations(out, _t0)
+    return _jsonable(out)
 
 
 # DeepVerifier 分解验证移植（rubric ③）——诚实适配说明：
@@ -579,16 +648,20 @@ def _handle_progress_start(params: dict[str, Any]) -> dict[str, Any]:
         kwargs["n_evaluations"] = bridge_fix.effective_n_evaluations(str(_model), kwargs.get("n_evaluations"))
     else:
         kwargs.setdefault("n_evaluations", 1)
+    # F4: ProgressTracker.update scores too — bound its inner fan-out likewise.
+    kwargs.setdefault("max_workers", _WORKERS)
     _sanitize_images(kwargs, "progress_start")
     kwargs["client"] = _get_client()
     kwargs = _filter_kwargs(kwargs, {
         "images", "n_evaluations", "max_workers", "model", "client",
     })
     with _TRACKERS_GUARD:
+        _prune_trackers(time.time())  # v0.7.3（评审 #8）：TTL 淘汰防泄漏
         tracker_id = f"tracker-{_NEXT_TRACKER_ID}"
         _NEXT_TRACKER_ID += 1
         _TRACKERS[tracker_id] = llm_verifier.ProgressTracker(problem, **kwargs)
         _TRACKER_LOCKS[tracker_id] = threading.Lock()
+        _touch_tracker(tracker_id)
     return {"tracker_id": tracker_id}
 
 
@@ -599,6 +672,9 @@ def _handle_progress_update(params: dict[str, Any]) -> dict[str, Any]:
     with _TRACKERS_GUARD:
         tracker = _TRACKERS.get(tracker_id)  # type: ignore[arg-type]
         lock = _TRACKER_LOCKS.get(tracker_id)  # type: ignore[arg-type]
+        # F5: TTL 按最近访问滚动——活跃长任务不会被下一次 progress_start 的清理误杀。
+        if tracker is not None:
+            _touch_tracker(tracker_id)  # type: ignore[arg-type]
     if tracker is None or lock is None:
         raise ValueError(f"unknown tracker_id: {tracker_id!r}")
     if not isinstance(step, str):
@@ -615,6 +691,7 @@ def _handle_progress_close(params: dict[str, Any]) -> dict[str, Any]:
     with _TRACKERS_GUARD:
         tracker = _TRACKERS.pop(tracker_id, None)  # type: ignore[arg-type]
         _TRACKER_LOCKS.pop(tracker_id, None)  # type: ignore[arg-type]
+        _TRACKER_LAST_SEEN.pop(tracker_id, None)
     if tracker is None:
         raise ValueError(f"unknown tracker_id: {tracker_id!r}")
     return {"closed": True}

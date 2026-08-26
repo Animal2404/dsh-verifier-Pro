@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ============================================================
- * merged-setup.mjs —— dsh-verifier-Pro 一键安装 / 诊断脚本
+ * setup.mjs —— dsh-verifier-Pro 一键安装 / 诊断脚本
  * ============================================================
  * 本文件是 setup-a / setup-b / setup-c 三份功能等价实现的合并版：
  *   · 底座：setup-c（最全的测试覆盖：四态 .venv 判定、占位符凭据过滤、
@@ -25,12 +25,16 @@
  *           WindowsApps 假 python3 探测过滤）。
  *
  * 用法：
- *   node merged-setup.mjs              # 等价于 --check（只诊断，不修改）
- *   node merged-setup.mjs --check      # 只诊断不修改；无论缺什么 exit code 恒为 0
- *   node merged-setup.mjs --fix        # 自动修复：创建 .venv、安装 llm-verifier
- *                                      # 成功 exit 0；失败按类型返回 10~14
- *   node merged-setup.mjs --help       # 帮助
+ *   node scripts/setup.mjs              # 等价于 --check（只诊断，不修改）
+ *   node scripts/setup.mjs --check      # 只诊断不修改；缺项时恒 exit 0（--strict 则 exit 1）
+ *   node scripts/setup.mjs --fix        # 自动修复：建 .venv + 装 llm-verifier + 写配置 +
+ *                                       # 构建 lib/ + 挂载到 profile（dsh CLI 可用时）
+ *                                       # 成功 exit 0；失败按类型返回 10~15
+ *   node scripts/setup.mjs --bench      # 判别力自检：固定微任务集实测评分模型质量（G1）
+ *   node scripts/setup.mjs --help       # 帮助
  *   --root <目录> / --root=<目录>      # 显式指定项目根目录（两种语法都支持）
+ *   --profile <名称>                   # 挂载目标 profile（默认 web；--no-mount 跳过挂载）
+ *   --strict                           # 与 --check 连用：存在待处理项时 exit 1（CI 用）
  *
  * 设计约束：
  *   - 纯 Node 实现、零第三方依赖（仅 node: 内置模块）；要求 Node >= 18；
@@ -39,8 +43,9 @@
  *   - 所有输出与注释均为中文。
  *
  * 退出码纪律：
- *   --check：报告正常完成恒为 0；仅诊断自身崩溃才非 0（1）。
- *   --fix  ：成功 0；参数错误 2；按失败类型返回 10~14。
+ *   --check          ：报告正常完成恒为 0（自动化预检请加 --strict，有缺项时 exit 1）；
+ *                       仅诊断自身崩溃才非 0（1）。
+ *   --fix            ：成功 0；参数错误 2；按失败类型返回 10~15。
  * ============================================================
  */
 
@@ -53,14 +58,16 @@ import { fileURLToPath } from 'node:url';
 /* ----------------------------- 常量 ----------------------------- */
 
 const SCRIPT_FILE = fileURLToPath(import.meta.url);
-const SELF_NAME = path.basename(process.argv[1] || SCRIPT_FILE) || 'merged-setup.mjs';
+const SELF_NAME = path.basename(process.argv[1] || SCRIPT_FILE) || 'setup.mjs';
 const IS_WIN = process.platform === 'win32';
 
 const MIN_NODE_MAJOR = 18;      // 项目要求的 Node 最低大版本
 const PY_PKG = 'llm-verifier';  // venv 内必需的 Python 包名
 const PY_MOD = 'llm_verifier';  // 对应的 import 模块名
 // D-9: the bridge needs post-0.2.0 APIs (token_usage hook, tagged path).
-const PY_PKG_REQ = 'llm-verifier>=0.2.0';
+// m-4（复盘 R-refcomp）：加上 <0.3.0 上界——上游 minor 破坏性变更会静默进入所有
+// 新装环境，与本项目「钉扎版本」的自身哲学一致；升级需有意解除上界并回归。
+const PY_PKG_REQ = 'llm-verifier>=0.2.0,<0.3.0';
 
 /** 【嫁接 A3】--fix 分型错误码表 */
 const EXIT = {
@@ -72,6 +79,7 @@ const EXIT = {
   PIP_INSTALL_FAILED: 12, // pip 安装 llm-verifier 失败
   NODE_TOO_OLD: 13,       // Node 版本低于 18
   ROOT_NOT_FOUND: 14,     // 无法定位项目根目录
+  BUILD_FAILED: 15,       // lib/ 构建失败（--fix 步骤⑤）
 };
 
 /**
@@ -86,6 +94,8 @@ const KNOWN_BACKENDS = [
     model: 'deepseek-chat',
     baseUrl: 'https://api.deepseek.com',
     applyUrl: 'https://platform.deepseek.com/api_keys',
+    // m-2（复盘 R-refcomp）：诚实标注——API 参数存在 ≠ 本仓实测过分布质量。
+    verifyHint: 'logprobs 分布质量未在本仓实测，建议先跑 scripts/probe_logprobs.py 验证',
   },
   {
     envKey: 'OPENCODE_GO_API_KEY',
@@ -101,6 +111,7 @@ const KNOWN_BACKENDS = [
     model: 'deepseek/deepseek-chat',
     baseUrl: 'https://openrouter.ai/api/v1',
     applyUrl: 'https://openrouter.ai/settings/keys',
+    verifyHint: '未验证 logprobs，建议先跑 scripts/probe_logprobs.py 验证',
   },
   {
     envKey: 'OPENAI_API_KEY',
@@ -108,6 +119,7 @@ const KNOWN_BACKENDS = [
     model: 'gpt-4o-mini',
     baseUrl: 'https://api.openai.com/v1',
     applyUrl: 'https://platform.openai.com/api-keys',
+    verifyHint: 'logprobs 支持未在本仓实测，建议先跑 scripts/probe_logprobs.py 验证',
   },
 ];
 
@@ -239,6 +251,7 @@ function run(exe, args, opts = {}) {
     encoding: 'utf8',
     windowsHide: true,
     timeout: opts.timeoutMs ?? 30_000,
+    cwd: opts.cwd,
     env: opts.env ?? { ...process.env, PYTHONIOENCODING: 'utf-8' },
     ...(opts.inherit ? { stdio: 'inherit' } : { stdio: ['ignore', 'pipe', 'pipe'] }),
   });
@@ -587,13 +600,14 @@ function recommendSnippet(backend) {
 }
 
 /**
- * 自动写入 cordis.patch.yml 的 verifierModel / backendBaseUrl（带备份）。
+ * F-2（复盘 R-refcomp）：把「写哪份 cordis.patch.yml」参数化——同一套替换逻辑
+ * 既用于仓库根的随包补丁，也用于 profile 的实际生效层
+ * （~/.dsh/profiles/<profile>/cordis.patch.yml）。
  * 返回 { written: boolean, backupPath?: string, error?: string }。
  */
-function writePatchConfig(root, backend) {
-  const patchPath = path.join(root, 'cordis.patch.yml');
+function patchConfigAt(patchPath, backend) {
   const text = readTextSafe(patchPath);
-  if (text == null) return { written: false, error: 'cordis.patch.yml 不存在' };
+  if (text == null) return { written: false, error: `${patchPath} 不存在` };
 
   // 备份（F8: 只保留最近 3 份，防 .bak.<ts> 无限堆积）
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -648,7 +662,7 @@ function writePatchConfig(root, backend) {
       insLines.forEach((l, k) => lines2.splice(insertAt + k, 0, indent + l));
       newText = lines2.join('\n');
     } else {
-      return { written: false, error: 'cordis.patch.yml 缺少 verifier-brain 条目或其 config 块；请手动添加 verifierModel/backendBaseUrl 两行后重试 --fix' };
+      return { written: false, error: `${path.basename(patchPath)} 缺少 verifier-brain 条目或其 config 块；请手动添加 verifierModel/backendBaseUrl 两行后重试 --fix` };
     }
   }
 
@@ -664,6 +678,53 @@ function writePatchConfig(root, backend) {
   }
 
   return { written: true, backupPath, vmReplaced, bbReplaced };
+}
+
+function writePatchConfig(root, backend) {
+  return patchConfigAt(path.join(root, 'cordis.patch.yml'), backend);
+}
+
+/** F-2：三层 cordis.patch.yml 关系——
+ *   ① 仓库根 cordis.patch.yml   （clone 目录里 --fix 写的那份）
+ *   ② 安装副本里的 cordis.patch.yml（dsh plugin add 随包分发进 profile 包目录）
+ *   ③ profile 补丁 ~/.dsh/profiles/<profile>/cordis.patch.yml（【实际生效层】，
+ *      覆盖前两者）。--fix 双写 ①+③；② 由宿主装配语义决定，改 ③ 即可覆盖它。 */
+function profilePatchPath(profile) {
+  return path.join(os.homedir(), '.dsh', 'profiles', profile, 'cordis.patch.yml');
+}
+
+/** 把推荐配置双写到仓库补丁 + profile 补丁（存在才写），返回渲染行与手动事项。 */
+function applyRecommendedConfig(root, backend, profile) {
+  const lines = [];
+  const manual = [];
+  const targets = [
+    ['仓库补丁', path.join(root, 'cordis.patch.yml')],
+    [`profile 补丁（实际生效层）`, profilePatchPath(profile)],
+  ];
+  let anyWritten = false;
+  for (const [label, p] of targets) {
+    if (!isFile(p)) {
+      if (label.startsWith('profile')) {
+        manual.push(`profile 补丁不存在：把 verifierModel/backendBaseUrl 两行加进 ${p} 的 verifier-brain 条目 config 块（或先 dsh plugin add 生成分发层后重跑 --fix）`);
+      }
+      continue;
+    }
+    const r = patchConfigAt(p, backend);
+    if (r.written) {
+      anyWritten = true;
+      lines.push(`${MARK_OK} 已更新${label}：${gray(p)}`);
+      lines.push(`      verifierModel:  ${backend.model}`);
+      lines.push(`      backendBaseUrl: ${backend.baseUrl}`);
+      if (r.backupPath) lines.push(`      ${gray('备份：')} ${path.basename(r.backupPath)}`);
+    } else {
+      lines.push(`${MARK_WARN} 更新${label}失败：${r.error}`);
+      manual.push(`手动把 verifierModel/backendBaseUrl 写入 ${p}`);
+    }
+  }
+  if (!anyWritten && manual.length === 0) {
+    manual.push(`未找到任何 cordis.patch.yml（仓库根与 ~/.dsh/profiles/${profile}/ 都没有）；安装后按 README「配置详解」节创建`);
+  }
+  return { lines, manual, anyWritten };
 }
 
 /** 【嫁接 B2】从 cordis.patch.yml 抓取当前硬编码的 verifierModel / backendBaseUrl 值。 */
@@ -712,6 +773,9 @@ function renderCredentialSection(creds, root, indent = '    ') {
     for (const l of recommendSnippet(primary)) {
       lines.push(`${indent}${gray('| ')}${cyan(l)}`);
     }
+    if (primary.verifyHint) {
+      lines.push(`${indent}${MARK_WARN} 验证标注：${primary.verifyHint}`);
+    }
     const others = creds.found.slice(1);
     if (others.length > 0) {
       lines.push(
@@ -750,7 +814,8 @@ function renderCredentialSection(creds, root, indent = '    ') {
 
 /* ----------------------------- --check 主流程 ----------------------------- */
 
-function runCheck(root) {
+function runCheck(root, opts = {}) {
+  const strict = Boolean(opts.strict);
   console.log('');
   console.log(bold(hr('=')));
   console.log(bold(' dsh-verifier-Pro 就绪报告（--check 只读诊断模式）'));
@@ -861,9 +926,51 @@ function runCheck(root) {
     );
   }
   console.log('');
-  console.log(gray('--check 模式恒定 exit 0（仅报告，不修改任何文件）。'));
+  // G1（复盘 R-refcomp）：判别力自检入口提示——probe 只验「能不能评」，
+  // 不验「评得好不好」；换评分模型后应跑一次质量回归门。
+  if (venv.state === 'ready' && venv.pkgState === 'ok' && creds.found.length > 0) {
+    console.log(`${cyan('·')} 可选：跑一次判别力自检验证评分模型质量（固定微任务 A/B 对照）：`);
+    console.log(`      ${cyan(`node ${SELF_NAME} --bench`)}`);
+  }
+  console.log('');
+  if (strict && missing.length > 0) {
+    console.log(gray('--check --strict 模式：存在待处理项，exit 1（供 CI/脚本化预检）。'));
+    process.exitCode = EXIT.GENERIC_FAILED;
+    return;
+  }
+  console.log(gray('--check 模式恒定 exit 0（仅报告，不修改任何文件）；自动化预检加 --strict。'));
 
   process.exitCode = EXIT.OK; // 明确满足"--check 恒 0"的退出码约定
+}
+
+/* ----------------------------- --bench 判别力自检（G1） ----------------------------- */
+
+/**
+ * 跑 scripts/discriminative_check.py：固定微任务集 A/B 对照，实测「评分模型
+ * 判别力」而非「连通性」。换评分模型后应跑一次，作为质量回归门。
+ */
+function runBench(root) {
+  const venv = checkVenv(root);
+  if (venv.state !== 'ready' || venv.pkgState !== 'ok') {
+    console.log(`${MARK_BAD} .venv 未就绪（先运行 node ${SELF_NAME} --fix），无法执行判别力自检。`);
+    process.exitCode = EXIT.GENERIC_FAILED;
+    return;
+  }
+  const script = path.join(root, 'scripts', 'discriminative_check.py');
+  if (!isFile(script)) {
+    console.log(`${MARK_BAD} 未找到 ${script}（安装不完整？）。`);
+    process.exitCode = EXIT.GENERIC_FAILED;
+    return;
+  }
+  console.log('');
+  console.log(bold(hr('=')));
+  console.log(bold(' dsh-verifier-Pro 判别力自检（--bench · G1）'));
+  console.log(gray(` 解释器：${venv.python}`));
+  console.log(bold(hr('=')));
+  console.log(`${cyan('·')} 将对固定微任务集发起真实评分调用（会产生少量 API 费用）；`);
+  console.log(`${cyan('·')} 通过标准：好/坏候选方向判定全部正确（详见脚本内说明）。`);
+  const r = run(venv.python, [script], { inherit: true, cwd: root, timeoutMs: 900_000 });
+  process.exitCode = r && !r.error && r.status === 0 ? EXIT.OK : EXIT.GENERIC_FAILED;
 }
 
 /* ----------------------------- --fix 主流程 ----------------------------- */
@@ -886,14 +993,16 @@ function finishFix(exitCode, manualItems) {
  * --fix 主流程。【嫁接 A3】失败按类型返回分型错误码：
  *   13=Node过旧 → 14=找不到项目根 → 10=无Python → 11=venv失败 → 12=pip失败。
  */
-function runFix(root) {
+function runFix(root, opts = {}) {
+  const profile = opts.profile || 'web';
   console.log('');
   console.log(bold(hr('=')));
   console.log(bold(' dsh-verifier-Pro 自动修复（--fix）'));
   console.log(gray(` 项目根目录：${root}`));
   console.log(bold(hr('=')));
   console.log('');
-  console.log(`${cyan('·')} 将依次执行：① 创建 .venv（若缺失）→ ② 安装 ${PY_PKG} → ③ 复核 → ④ 输出剩余手动事项`);
+  console.log(`${cyan('·')} 将依次执行：① 创建 .venv（若缺失）→ ② 安装 ${PY_PKG} → ③ 复核 →`);
+  console.log(`${cyan('·')}   ④ 双写推荐评分配置（仓库补丁 + profile 补丁）→ ⑤ 构建 lib/ → ⑥ 挂载到 profile「${profile}」`);
   console.log(gray('  凡涉及写入文件或网络下载的操作，都会先打印实际执行的命令再运行。'));
 
   // ---------- 前置校验 ①：Node 版本硬门槛（【嫁接 A3】退出码 13） ----------
@@ -917,7 +1026,7 @@ function runFix(root) {
 
   // ---------- 步骤 ①：确保 .venv ----------
   console.log('');
-  console.log(bold('【步骤 1/4】确保 Python 虚拟环境 .venv'));
+  console.log(bold('【步骤 1/6】确保 Python 虚拟环境 .venv'));
   let venv = checkVenv(root);
   if (venv.state === 'ready' || venv.state === 'noPkg') {
     console.log(`  ${MARK_OK} 已有可用虚拟环境：${venv.dir}${venv.version ? gray(`（Python ${venv.version}）`) : ''}`);
@@ -943,9 +1052,9 @@ function runFix(root) {
       return;
     }
     const chosen = pythons[0];
-    if (versionWeight(chosen.version) < versionWeight('3.9')) {
-      // 仅提示性软警告：低于 3.9 时提醒，但不阻止继续
-      console.log(`  ${MARK_WARN} 选中的 Python ${chosen.version} 版本较老，llm-verifier 可能要求 >= 3.9`);
+    // m-1（复盘 R-refcomp）：与 README 口径对齐（Python 3.10+）；仅软警告不阻止。
+    if (versionWeight(chosen.version) < versionWeight('3.10')) {
+      console.log(`  ${MARK_WARN} 选中的 Python ${chosen.version} 低于文档声明的 3.10+，llm-verifier 可能不兼容（CI 仅实测 3.12）`);
     }
     const prefixStr = chosen.prefix.length > 0 ? chosen.prefix.join(' ') + ' ' : '';
     const prefixNote = chosen.prefix.length > 0 ? `（${chosen.prefix.join(' ')}）` : '';
@@ -974,7 +1083,7 @@ function runFix(root) {
 
   // ---------- 步骤 ②：安装 llm-verifier ----------
   console.log('');
-  console.log(bold(`【步骤 2/4】在 .venv 中安装 ${PY_PKG}`));
+  console.log(bold(`【步骤 2/6】在 .venv 中安装 ${PY_PKG}`));
   venv = checkVenv(root);
   if (venv.state === 'ready') {
     console.log(`  ${MARK_OK} ${PY_PKG} 已可导入，跳过安装（如需重装请先 pip uninstall ${PY_PKG}）。`);
@@ -1008,7 +1117,7 @@ function runFix(root) {
 
   // ---------- 步骤 ③：复核 ----------
   console.log('');
-  console.log(bold('【步骤 3/4】复核安装结果'));
+  console.log(bold('【步骤 3/6】复核安装结果'));
   venv = checkVenv(root);
   const coreOk =
     (venv.state === 'ready' && venv.pkgState === 'ok') ||
@@ -1022,54 +1131,97 @@ function runFix(root) {
     if (venv.pkgError) console.log(indentBlock(venv.pkgError));
   }
 
-  // ---------- 步骤 ③.5：自动写入 cordis.patch.yml 推荐配置 ----------
+  // ---------- 步骤 ④：双写推荐配置（F-2：仓库补丁 + profile 实际生效层） ----------
   console.log('');
-  console.log(bold('【步骤 3.5/4】自动写入推荐评分后端配置'));
+  console.log(bold('【步骤 4/6】双写推荐评分后端配置'));
+  console.log(`  ${gray('三层关系：① clone 目录的 cordis.patch.yml（本步写）→ ② 安装副本随包分发的同名文件 →')}`);
+  console.log(`  ${gray('③ ~/.dsh/profiles/' + profile + '/cordis.patch.yml 是【实际生效层】，覆盖前两者——本步两层都写，改配置只需认 ③。')}`);
   const credsForPatch = gatherCredentials();
   let patchWritten = false;
-  let patchBackup = '';
+  const fixManual = [];
   if (credsForPatch.found.length > 0) {
     const primary = credsForPatch.found[0];
-    const result = writePatchConfig(root, primary);
-    if (result.written) {
-      patchWritten = true;
-      patchBackup = result.backupPath;
-      console.log(`  ${MARK_OK} 已自动更新 cordis.patch.yml：`);
-      console.log(`      verifierModel:  ${primary.model}`);
-      console.log(`      backendBaseUrl: ${primary.baseUrl}`);
-      console.log(`      ${gray('备份：')} ${path.basename(result.backupPath)}`);
-    } else {
-      console.log(`  ${MARK_WARN} 自动更新失败：${result.error}，需手动修改`);
-    }
+    const applied = applyRecommendedConfig(root, primary, profile);
+    for (const l of applied.lines) console.log(`  ${l}`);
+    for (const m of applied.manual) fixManual.push(m);
+    patchWritten = applied.anyWritten;
   } else {
     console.log(`  ${MARK_WARN} 无可用凭据，跳过自动更新（需手动配置后再运行 --fix）`);
   }
 
-  // ---------- 步骤 ④：剩余手动事项 ----------
+  // ---------- 步骤 ⑤：构建 lib/（F-1：一键安装必须真的产出可加载的插件） ----------
   console.log('');
-  console.log(bold('【步骤 4/4】需要你手动确认的事项'));
-  const manual = [];
-
-  const lib = checkLibBuild(root);
-  if (lib.ok) {
-    console.log(`  ${MARK_OK} lib/ 编译产物齐全（${lib.jsCount} 个 .js 文件），无需处理。`);
+  console.log(bold('【步骤 5/6】构建 lib/（npm run build）'));
+  let buildOk = false;
+  let lib = checkLibBuild(root);
+  if (lib.ok && !process.env.FORCE_BUILD) {
+    console.log(`  ${MARK_OK} lib/ 编译产物已存在（${lib.jsCount} 个 .js 文件），跳过构建（FORCE_BUILD=1 可强制重建）。`);
+    buildOk = true;
   } else {
-    const bc = buildCommandHint(root);
-    console.log(`  ${MARK_WARN} lib/ 编译产物缺失，请在项目根目录执行：${cyan(bc)}`);
-    manual.push(`编译产物缺失：${bc}`);
+    const npmExe = IS_WIN ? 'npm.cmd' : 'npm';
+    console.log(`  ${cyan('·')} 即将执行（首次可能引导安装 typescript/tsdown，需联网）：`);
+    console.log(gray(`      > ${npmExe} run build`));
+    const r = run(npmExe, ['run', 'build'], { inherit: true, cwd: root, timeoutMs: 900_000 });
+    lib = checkLibBuild(root);
+    buildOk = Boolean(r && !r.error && r.status === 0 && lib.ok);
+    if (buildOk) {
+      console.log(`  ${MARK_OK} 构建完成（lib/ 共 ${lib.jsCount} 个 .js 文件）。`);
+    } else {
+      console.log(`  ${MARK_BAD} 构建失败或产物缺失。请手动在项目根目录执行：${cyan(buildCommandHint(root))}`);
+      fixManual.push(`构建失败：请在项目根目录执行 ${buildCommandHint(root)} 后重试`);
+    }
   }
+
+  // ---------- 步骤 ⑥：挂载到 profile（F-1 收尾） ----------
+  console.log('');
+  console.log(bold(`【步骤 6/6】挂载到 dsh profile「${profile}」`));
+  const mountCmd = `dsh plugin --profile ${profile} add ${q(root)}`;
+  if (opts.noMount) {
+    console.log(`  ${MARK_WARN} 已指定 --no-mount，跳过自动挂载。就绪后请执行：`);
+    console.log(gray(`      > ${mountCmd}`));
+  } else {
+    const dshExe = detectDshCli();
+    if (!dshExe) {
+      console.log(`  ${MARK_WARN} 未检测到 dsh CLI（不在 PATH）。环境就绪后请手动挂载并重启 dsh：`);
+      console.log(gray(`      > ${mountCmd}`));
+      fixManual.push(`挂载：${mountCmd} ，然后重启 dsh`);
+    } else {
+      console.log(`  ${cyan('·')} 检测到 dsh CLI，即将执行：`);
+      console.log(gray(`      > ${mountCmd}`));
+      const r = run(dshExe, ['plugin', '--profile', profile, 'add', root], { inherit: true, cwd: root, timeoutMs: 300_000 });
+      if (!r || r.error || r.status !== 0) {
+        console.log(`  ${MARK_WARN} 自动挂载未成功，请手动执行：${mountCmd}`);
+        fixManual.push(`自动挂载未成功，请手动执行：${mountCmd} ，然后重启 dsh`);
+      } else {
+        console.log(`  ${MARK_OK} 已挂载到 profile「${profile}」。重启 dsh 生效；Web 页面如已打开请刷新一次。`);
+      }
+    }
+  }
+
+  // ---------- 剩余手动事项 ----------
+  console.log('');
+  console.log(bold('剩余需要你确认的事项'));
+  const manual = fixManual;
 
   const creds = gatherCredentials();
   for (const line of renderCredentialSection(creds, root, '      ')) {
     console.log(`  ${line}`);
   }
   if (creds.found.length > 0 && !patchWritten) {
-    manual.push('把推荐的 verifierModel/backendBaseUrl 写入 cordis.patch.yml（替换作者环境的硬编码值）');
+    manual.push('把推荐的 verifierModel/backendBaseUrl 写入 cordis.patch.yml 的 verifier-brain 条目（profile 层优先）');
   } else if (creds.found.length === 0) {
     manual.push('申请并配置至少一个评分后端凭据（见上方渠道）');
   }
 
-  finishFix(coreOk ? EXIT.OK : EXIT.GENERIC_FAILED, manual);
+  const exitCode = !coreOk ? EXIT.GENERIC_FAILED : (!buildOk ? EXIT.BUILD_FAILED : EXIT.OK);
+  finishFix(exitCode, manual);
+}
+
+/** F-1：探测 dsh CLI 是否可用（返回可执行名或 null）。 */
+function detectDshCli() {
+  const exe = IS_WIN ? 'dsh.cmd' : 'dsh';
+  const r = run(exe, ['--version'], { timeoutMs: 15_000 });
+  return r && !r.error && r.status === 0 ? exe : null;
 }
 
 /* ----------------------------- 帮助与入口 ----------------------------- */
@@ -1082,18 +1234,26 @@ function printHelp() {
   console.log(`  node ${SELF_NAME} [--check | --fix] [--root <项目根目录>]`);
   console.log('');
   console.log('模式：');
-  console.log('  （默认，等价 --check）只诊断不修改，输出就绪报告；无论缺什么，退出码恒为 0。');
-  console.log('  --fix                  自动修复：创建 .venv、在其中 pip 安装 llm-verifier，');
-  console.log('                         成功退出码 0；失败按类型返回：');
+  console.log('  （默认，等价 --check）只诊断不修改，输出就绪报告；缺项时恒 exit 0。');
+  console.log('  --fix                  自动修复：创建 .venv → pip 安装 llm-verifier → 复核 →');
+  console.log('                         双写推荐配置（仓库补丁 + profile 补丁）→ 构建 lib/ →');
+  console.log('                         挂载到 dsh profile。成功退出码 0；失败按类型返回：');
   console.log('                           10 = 未找到可用系统 Python');
   console.log('                           11 = 创建 .venv 失败');
   console.log('                           12 = pip 安装 llm-verifier 失败');
   console.log('                           13 = Node 版本过低');
   console.log('                           14 = 找不到项目根目录');
+  console.log('                           15 = lib/ 构建失败');
+  console.log('  --bench                判别力自检（G1）：固定微任务集实测评分模型判别力，');
+  console.log('                         换评分模型后的质量回归门（产生少量真实 API 费用）;');
+  console.log('                         全部方向判定正确 exit 0，否则 exit 1。');
   console.log('  --help, -h             显示本帮助。');
   console.log('');
   console.log('选项：');
   console.log('  --root <目录>          显式指定项目根目录（支持 "--root 目录" 与 "--root=目录" 两种写法）。');
+  console.log('  --profile <名称>       --fix 挂载目标 profile（默认 web）。');
+  console.log('  --no-mount             --fix 只做到构建为止，不自动挂载。');
+  console.log('  --strict               与 --check 连用：存在待处理项时 exit 1（CI/脚本化预检）。');
   console.log('');
   console.log('示例：');
   console.log(`  node ${SELF_NAME}                # clone 之后先做个体检`);
@@ -1119,25 +1279,35 @@ function main() {
 
   const wantFix = argv.includes('--fix');
   const wantCheck = argv.includes('--check');
+  const wantBench = argv.includes('--bench');
+  const strict = argv.includes('--strict');
+  const noMount = argv.includes('--no-mount');
 
-  // --root 既支持 "--root <目录>"（值是下一个 token，需加入白名单），
-  // 也支持 "--root=<目录>"。若下一个 token 以 -- 开头则视为没给值。
-  const rootFlagIdx = argv.indexOf('--root');
-  const rootValueIdx =
-    rootFlagIdx !== -1 && argv[rootFlagIdx + 1] && !argv[rootFlagIdx + 1].startsWith('--')
-      ? rootFlagIdx + 1
-      : -1;
+  // --root / --profile 均支持 "空格分隔" 与 "=" 连写两种语法。
+  const valueFlagIdx = (name) => {
+    const i = argv.indexOf(name);
+    return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? i + 1 : -1;
+  };
+  const rootValueIdx = valueFlagIdx('--root');
+  const profileValueIdx = valueFlagIdx('--profile');
+  const profileEq = argv.find((a) => a.startsWith('--profile='));
 
+  const knownFlags = new Set(['--fix', '--check', '--bench', '--strict', '--no-mount', '--root', '--profile']);
   const unknown = argv.filter((a, i) => {
-    if (a === '--fix' || a === '--check' || a === '--root' || a.startsWith('--root=')) return false;
-    if (i === rootValueIdx) return false; // 这是 --root 的目录值，不是未知参数
+    if (knownFlags.has(a) || a.startsWith('--root=') || a.startsWith('--profile=')) return false;
+    if (i === rootValueIdx || i === profileValueIdx) return false; // 标志的值，不是未知参数
     return true;
   });
 
   // 退出码纪律：参数错误一律 2（保留自 setup-c）
-  if (wantFix && wantCheck) {
-    console.error(red('错误：--check 与 --fix 不能同时使用。'));
+  if ((wantFix && wantCheck) || (wantBench && (wantFix || wantCheck))) {
+    console.error(red('错误：--check / --fix / --bench 只能三选一。'));
     printHelp();
+    process.exitCode = EXIT.BAD_ARGS;
+    return;
+  }
+  if (strict && !wantCheck) {
+    console.error(red('错误：--strict 只能与 --check 连用。'));
     process.exitCode = EXIT.BAD_ARGS;
     return;
   }
@@ -1148,11 +1318,19 @@ function main() {
     return;
   }
 
+  const opts = {
+    strict,
+    noMount,
+    profile: profileEq ? normalizeYamlScalar(profileEq.slice('--profile='.length)) : undefined,
+  };
+
   const root = findProjectRoot(argv);
   if (wantFix) {
-    runFix(root);
+    runFix(root, opts);
+  } else if (wantBench) {
+    runBench(root);
   } else {
-    runCheck(root); // 默认行为等价于 --check
+    runCheck(root, opts); // 默认行为等价于 --check
   }
 }
 

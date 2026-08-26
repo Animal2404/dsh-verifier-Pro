@@ -13,6 +13,8 @@ function fakeBridge(script) {
     calls,
     async request(method, params) {
       if (method === 'probe_model') return { ok: true, logprobs_supported: true }
+      // G2: gatedRequest 会做前后 usage 读数（本地查询，不消费脚本）——与真实桥一致。
+      if (method === 'usage') return { usage: { input_tokens: 0, output_tokens: 0 } }
       calls.push({ method, model: params.model, params })
       const next = script.shift()
       if (!next) throw new Error('unexpected call: ' + method)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * dsh-verifier-Pro 验收回归脚本
- * 对应 ITERATION_PLAN.md §3 十个验收用例
+ * 对应 ITERATION_PLAN.md §3 十个验收用例（原文档已归档至 docs/HISTORY.md）
  */
 
 import { spawn } from 'child_process';

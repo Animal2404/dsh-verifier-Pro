@@ -50,6 +50,7 @@ import os
 import re
 import sys
 import threading
+import time
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,17 @@ _STATE_LOCK = threading.Lock()
 _DEGRADED_PROBE_TS: dict[str, float] = {}
 _DEGRADED_PROBE_TTL = 300  # seconds
 
+# v0.7.3（外部评审 #4-矛盾链）：
+# 1) probe_model_v2 对表外模型可动态判定 literal-mc（logprobs 失败 + 标签发射成功），
+#    但 _make_router/score_mode_for 只查静态表 → 表外模型在真正评分时按 unknown 走
+#    官方 logprobs 路径 → 必然 raise "no answer logprobs"。这里把 probe 动态确认的
+#    literal-mc 模型记入进程内集合（TTL），router 据此刻意走 literal-mc 路径。
+# 2) probe 结果完全无缓存：同步路径每次传非默认 model 都重新探测，而表外模型的
+#    标签探测是 4096+ token 的真实计费调用——反复调用反复烧钱。_PROBE_CACHE 兜底。
+_PROBE_TTL_S = 5 * 60
+_DYNAMIC_LITERAL_MC: dict[str, float] = {}          # model_lower -> expires_ts
+_PROBE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}  # resolved -> (expires_ts, result)
+
 def _degraded_recheck_due(model: str) -> bool:
     """True when a live recheck is due for a degraded model (throttled)."""
     import time as _time
@@ -161,19 +173,29 @@ def _degraded_recheck_due(model: str) -> bool:
 
 def _observe_score_tags(model: str, text: str) -> None:
     """Called after every literal-mc scoring reply. Tag present -> clear the
-    streak; missing -> increment; >= MAX_TAG_FAILURES -> mark degraded."""
+    streak; missing -> increment; >= MAX_TAG_FAILURES -> mark degraded.
+
+    F2（复盘 R-refcomp）：部分丢失（只有单侧 <score_X> 标签）不改降级语义——
+    带任意标签仍算自愈信号；但单独记录成逐请求事件，由桥处理器在本次评分结果上
+    挂警告。否则「K 个样本里丢了几个标签 → 官方 extract_score 字面回退 0.5 静默
+    稀释 Monte-Carlo 均值」完全不可见。"""
     if not model:
         return
-    has_tag = "<score" in (text or "").lower()
+    lowered = (text or "").lower()
+    has_tag = "<score" in lowered
+    # 不同字母数：完整 compare 配对应出现 A、B 两侧；只有一侧 = 另一侧已回退 0.5。
+    n_letters = len(set(re.findall(r"<score_([a-t])>", lowered)))
     with _STATE_LOCK:
         if has_tag:
             _TAG_FAILURES.pop(model, None)
             _DEGRADED_MODELS.discard(model)
-            return
-        n = _TAG_FAILURES.get(model, 0) + 1
-        _TAG_FAILURES[model] = n
-        if n >= MAX_TAG_FAILURES:
-            _DEGRADED_MODELS.add(model)
+        else:
+            n = _TAG_FAILURES.get(model, 0) + 1
+            _TAG_FAILURES[model] = n
+            if n >= MAX_TAG_FAILURES:
+                _DEGRADED_MODELS.add(model)
+        if has_tag and n_letters < 2:
+            record_partial_tag_loss(max(1, 2 - n_letters))
 
 
 def is_degraded(model: str) -> bool:
@@ -221,6 +243,12 @@ def score_mode_for(model: str) -> str:
         return "logprobs"
     p = profile_for(model)
     if p is None:
+        # v0.7.3（评审 #4）：表外模型若已被 probe 动态确认为 literal-mc（TTL 内），
+        # 路由到 literal-mc——否则返回 unknown（router 会误走官方 logprobs 路径必挂）。
+        with _STATE_LOCK:
+            exp = _DYNAMIC_LITERAL_MC.get(lowered, 0.0)
+        if exp > time.time():
+            return "literal-mc"
         return "unknown"
     if p.get("logprobs") == "absent-ok":
         # 审查 #1：档案模型若已被观测到连续无标签输出，进入 degraded 状态——
@@ -286,7 +314,7 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
         text, finish, _ = _call()
     # CompassVerifier C-class response-shape detection (mechanical):
     # incomplete (finish_reason=length) / repetitive (n-gram loop) / refusal.
-    _RESPONSE_SHAPE.value = detect_response_shape(text, finish)
+    record_response_event(detect_response_shape(text, finish))
     if _observe:
         # 审查 #1：评分响应观测——无 <score_X> 标签会累积到降级状态。
         _observe_score_tags(model, text)
@@ -297,7 +325,72 @@ def call_no_logprobs(client, prompt: str, model: str, max_tokens: int | None = N
 # CompassVerifier C-class response-shape detection
 # ---------------------------------------------------------------------------
 
-_RESPONSE_SHAPE = threading.local()
+# F3（复盘 R-refcomp）：形态/部分丢失事件不再存 thread-local——官方包把配对打分
+# 放进了内层 ThreadPoolExecutor（fine_grained_reward.run_phase 无条件开池），写入
+# 发生在池线程、读取发生在桥处理器线程，thread-local 恒为 None → 检测在 select /
+# 多 job compare 上是死代码。改为进程级有界事件表：写入方任意线程，读取方在调用
+# 官方 API 前记 t0=monotonic()、结束后 drain(t0) 取走窗口内事件。并发请求窗口
+# 重叠时个别事件可能跨请求互串（罕见，且只影响告警不影响分数）——这是让主路径
+# 检测真正生效的代价，已知并接受。
+
+_MAX_OBS_EVENTS = 256
+
+_RESPONSE_EVENTS: list[tuple[float, str]] = []
+_PARTIAL_TAG_LOSSES: list[tuple[float, int]] = []  # (ts, 丢失侧数)
+_OBS_LOCK = threading.Lock()
+
+
+def record_response_event(shape: str | None) -> None:
+    if not shape:
+        return
+    with _OBS_LOCK:
+        _RESPONSE_EVENTS.append((time.monotonic(), shape))
+        if len(_RESPONSE_EVENTS) > _MAX_OBS_EVENTS:
+            del _RESPONSE_EVENTS[: len(_RESPONSE_EVENTS) - _MAX_OBS_EVENTS]
+
+
+def record_partial_tag_loss(missing: int) -> None:
+    with _OBS_LOCK:
+        _PARTIAL_TAG_LOSSES.append((time.monotonic(), max(1, missing)))
+        if len(_PARTIAL_TAG_LOSSES) > _MAX_OBS_EVENTS:
+            del _PARTIAL_TAG_LOSSES[: len(_PARTIAL_TAG_LOSSES) - _MAX_OBS_EVENTS]
+
+
+def consume_response_events(since: float | None = None) -> dict[str, int]:
+    """Drain response-shape events recorded at/after `since` (monotonic ts),
+    returning {shape: count}. `since=None` drains everything."""
+    with _OBS_LOCK:
+        if since is None:
+            picked, _RESPONSE_EVENTS[:] = list(_RESPONSE_EVENTS), []
+        else:
+            picked = [e for e in _RESPONSE_EVENTS if e[0] >= since]
+            _RESPONSE_EVENTS[:] = [e for e in _RESPONSE_EVENTS if e[0] < since]
+    counts: dict[str, int] = {}
+    for _, s in picked:
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def consume_partial_tag_losses(since: float | None = None) -> int:
+    """F2: drain partial-tag-loss events, returning the number of samples that
+    fell back to the literal 0.5 because one side of the <score_X> pair was
+    missing from an otherwise tagged reply."""
+    with _OBS_LOCK:
+        if since is None:
+            picked, _PARTIAL_TAG_LOSSES[:] = list(_PARTIAL_TAG_LOSSES), []
+        else:
+            picked = [e for e in _PARTIAL_TAG_LOSSES if e[0] >= since]
+            _PARTIAL_TAG_LOSSES[:] = [e for e in _PARTIAL_TAG_LOSSES if e[0] < since]
+    return sum(n for _, n in picked)
+
+
+def consume_response_shape() -> str | None:
+    """Legacy single-value drain: the most frequent shape since the last call.
+    New callers should use consume_response_events(since)."""
+    counts = consume_response_events()
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
 def detect_response_shape(text: str, finish_reason: str | None) -> str | None:
@@ -330,13 +423,6 @@ def detect_response_shape(text: str, finish_reason: str | None) -> str | None:
             if seen and max(seen.values()) >= 3:
                 return "repetitive"
     return None
-
-
-def consume_response_shape() -> str | None:
-    """Bridge handler reads (and clears) the last response-shape flag."""
-    shape = getattr(_RESPONSE_SHAPE, "value", None)
-    _RESPONSE_SHAPE.value = None
-    return shape
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +544,13 @@ def probe_model_v2(client, model: str) -> dict[str, Any]:
     from llm_verifier import fine_grained_reward as fgr
     resolved = fgr.resolve_model(client, model)
     result["model"] = resolved
+    # v0.7.3（评审 #4）：表外模型的标签探测是 4096+ token 的真实计费调用——TTL 内
+    # 命中缓存直接复用，避免每次评分尝试都重新探测白烧费。
+    cache_key = "probe:" + str(resolved)
+    with _STATE_LOCK:
+        hit = _PROBE_CACHE.get(cache_key)
+    if hit and hit[0] > time.time():
+        return dict(hit[1])
     mode = score_mode_for(model)
     if mode != "unknown":
         if mode == "logprobs":
@@ -541,6 +634,13 @@ def probe_model_v2(client, model: str) -> dict[str, Any]:
         if emission and emission.get("score_A") and emission.get("score_B"):
             result["ok"] = True
             result["score_mode"] = "literal-mc"
+            # v0.7.3（评审 #4）：probe 动态确认 literal-mc → 记入路由集合，
+            # 此后 score_mode_for/_make_router 对该模型走 literal-mc，不再误走官方
+            # logprobs 路径（必然 raise）。TTL 过期后重新判定。
+            with _STATE_LOCK:
+                _DYNAMIC_LITERAL_MC[str(resolved).lower()] = time.time() + _PROBE_TTL_S
+        with _STATE_LOCK:
+            _PROBE_CACHE[cache_key] = (time.time() + _PROBE_TTL_S, result)
         return result
 
     # mode == 'logprobs' but probe failed → genuinely unsupported.

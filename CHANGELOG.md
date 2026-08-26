@@ -2,6 +2,144 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.7.4] - 2026-08-26（bestofn-refcomp 终版合并报告修复批）
+
+### Fixed
+
+- **F1（fatal）**：task_start(track) 整链绕过运输层加固——异步任务执行器只把 select/compare 交给 runner，track 直达裸桥请求（无 sanitize / n_evaluations 上界 / costGuard / scoringGate / clamp01）。现在 task_start 全部方法收口到同一 runner，fall-through 分支补 U-N4 checkpoint_steps 校验
+- **F2**：literal-mc 部分丢标签静默折算 0.5 混入均值——新增逐请求事件：单侧标签缺失计入窗口计数，桥在结果上挂「已按字面回退 0.5 计入」告警；降级自愈语义不变
+- **F3（MAJOR）**：响应形态异常检测存 thread-local，官方内层线程池写入、处理器线程读取恒为 None（主力路径死代码）——改为进程级有界事件表 + t0 窗口化 drain，select/多 job compare 上真正生效
+- **F4（MAJOR)**：maxWorkers 只限桥请求层，官方内层 fan-out 缺省走 50/500 路——四个评分 handler 现将 max_workers 缺省钳制到桥 worker 数（显式传参仍可覆盖）
+- **F5**：ProgressTracker TTL 按创建时间计杀活跃 tracker → 改最近访问滚动
+- **F6**：track 全 0.5 形态护栏——官方对不可读 checkpoint 静默记 0.5，桥侧统一打 anomaly/warning（同步/异步/服务缝一次覆盖）
+- **F7**：flat 分支渲染双 ⚠️ → 走幂等 warnText
+- **F8**：compare/select unstable 返回补 duration_ms
+- **F9**：evaluate_session 导出表 checkpoint 序号错位 → 桥透传官方 ProgressResult.steps，导出用真实步号
+- **F11**：升级 reps 不参与缓存去重（并发同参双烧）→ compare 升级轮与 select 整场升级锦标赛进 in-flight 缓存
+- **F12**：compare exact-flat 告警错误归因 on_error="tie"（官方 compare 无此参数）→ 改为 extract_score 字面回退真机制
+- **F13**：JSONL 轮换 rename 重试忙等阻塞宿主事件循环 → 直接落内容等价 direct write 回退
+- F10 探测预检不对称【交叉互评降级存疑】：不修（建议修法破坏 fail-closed 自愈）
+
+### Added（能力缺口 G1-G5）
+
+- **G1** 判别力自检基准：scripts/discriminative_check.py 固定微任务集 A/B 对照（粗判别/细判别/中文/跑题），setup.mjs --bench 一键接入——换评分模型后的质量回归门
+- **G2** 真实 token 计量回填 costGuard：gatedRequest 前后读 usage 差值进按 kind 的 EMA，估算优先实测、时长粗估兜底取较大值
+- **G3** criteria .md 模板库热加载：criteria/ 目录（TEMPLATE + deep_review/root_cause 目录版优先于内置），每次评分读盘即生效，名字白名单防路径穿越
+- **G5** verifier config 只读回显 action：生效配置 + 修改位置提示（不做设置页，配置单源化是刻意取舍）
+- setup.mjs --strict（CI 预检 exit 1）/ --profile / --no-mount / --bench 旗标；退出码新增 15=构建失败
+
+### Verified（实弹）
+
+- **G1 判别力基准 4/4 通过**（flash-vision-exp @ opencode，四任务 margin +1.000/+0.106/+0.991/+1.000）；脚本首跑全 0.5 暴露直调官方 API 未打标 client 的坑——已在脚本内对齐桥的 `_llm_verifier_deepseek` 打标 + bridge_fix.install()
+- **G4 多模态 images 首次真实验证通过**：红/蓝方块带图 select 正确择红（index=0，0.654/0.346）
+- 附带修复：README probe_logprobs.py 参数顺序文档反了（实际签名 base_url api_key model）
+
+### Installer（安装体验 fatal×2 + MAJOR×5）
+
+- **F-1**：「一键安装」跑完并未安装插件 → --fix 六步闭环（venv→pip→复核→双写推荐配置→构建→挂载 profile），README 同节重写
+- **F-2**：端到端示例硬编码作者本地目录 + 三份 cordis.patch.yml 生效关系未定义 → 示例去硬编码、--fix 双写仓库+profile 补丁、三层关系图入档
+- **M-1**：默认后端=作者私有凭据环境 → 插件启动检测无凭据时打响亮告警指向 setup.mjs
+- **M-5**：宣称 Windows 一等公民但构建硬依赖 bash → npm run build 改纯 Node 入口 scripts/build.mjs（build.sh 保留）
+- **M-6**：凭据→backendBaseUrl 解析零文档 → README 新增绑定表与优先级规则
+- M-4【交叉互评降级为文档缺口】→ README 新增「卸载与残留清理」表（含 stateDir 敏感数据提示）
+- m-1 Python 口径对齐 3.10 · m-2 deepseek-chat 行诚实标注 · m-3 cordis.patch.yml literal-mc 注释矛盾修正 · m-4 llm-verifier 加 <0.3.0 上界钉扎 · m-5 ZH 示例配置块补全 · m-9 merged-setup.mjs 残留改名 · m-10 --check 恒 0 限制以 --strict 收口
+
+### Docs
+
+- M-2/M-3：README.en.md 与 ZH 对齐（补齐手动安装/配置详解/FAQ/命名/端到端/criteria/升级卸载节，action 数 8→12）；ZH 新增升级与卸载节、钉扎示例动态措辞；ci.yml 兑现 workflow_dispatch；PROGRESS.md 版本漂移追平（v0.7.1-v0.7.4）
+- 打包修正：npm files 白名单补 `criteria/`（G3 模板目录）、`scripts/discriminative_check.py`（G1 基准，--bench 依赖）、`scripts/build.mjs`（M-5 纯 Node 构建入口）——此前均不会进 tgz
+- 本地工程记忆归档：12 份历史开发文档合并为 docs/HISTORY.md（沿用 docs/* 的 .gitignore 排除策略，不入公开仓库）；PLAN/README/acceptance 脚本的引用同步改指归档
+
+## [0.7.3] - 2026-08-26（外部评审 4 个确认 bug + 逻辑问题修复）
+
+### Fixed（外部评审报告 AUDIT-2026-08-26，全部经逐条源码核验后修复）
+
+- **#1（BUG）**：bestofn 输出目录清理正则永不匹配——生成名带毫秒+`Z` 尾巴（`...T09-15-30-123Z`），清理要求秒后直接结束 → B13 清理是死代码，每个 `/bestofn --local` 永久留目录。正则改为容忍 `-\d{3}Z` 后缀
+- **#2（BUG）**：costGuard 语义与文档相反 + 永久锁死——旧实现按「最近 20 条累计 + 本次」拦截，攒满窗口必超小额预算 → 之后全部被拒；且被拒不落 history → 窗口冻结只能手删解锁。改回文档语义「单次验证最大成本」（仅按本次估算判断）
+- **#3（BUG）**：服务缝绕过数值 criteria 拒绝——`parseCriteria` 只在同步字符串路径拦，服务缝传对象原样透传 → 官方包把 0.5 字符串化成无意义描述。拒绝移入 `expandCriteria`（runSelect/runCompare 唯一收口）
+- **#4（BUG）**：未知模型探测结论与评分路由互相矛盾 + probe 无缓存——probe 动态判定 literal-mc 但 router 只查静态表 → 白烧探测费后照样挂；表外标签探测是 4096+ token 真实计费调用且每次重探。修复：probe 结论记入进程内集合（router 走 literal-mc）+ probe 结果 TTL 缓存（5min）
+- **#5**：history 被 cache 命中污染（~1ms 记录拖垮中位数 → 成本/水位系统性低估）→ costGuard 与 estimateCallMs 过滤 `cached !== true`
+- **#7**：`degenerate_extreme` 误伤真实共识（双优 0.97/0.96 也被打退化警告）→ 加区分度条件（极差 <0.02 才告警）
+- **#8**：ProgressTracker 只增不减（agent 忘 close 随桥进程寿命泄漏）→ 新建时 TTL 淘汰超 1 小时的 tracker
+- **#12**：`npm test` 的 glob 在 cmd 不展开、Node<21 报找不到模块 → 实测各形态后保留 node 自展开 glob（Node21+ 由 --test 自行展开，任意 shell 可用；Node18/20 为 EOL 不再适配）
+- 新增回归测试：全挤极端无区分度告警 / 双优有区分度不误报 —— 测试 **94/94** 全绿
+
+### 已知限制（记录不修）
+- #6 select 升级 k_used 叙述与平均权重不符（行为正确，如实标注即可）；#9 decompose 不进 history/costGuard（改动面大）；#10 unstable 分支缺 duration_ms 等观感项；#11 MODEL_PROFILES 硬编码快照的移植性（结构性）；#13 sanitize 截断对调用方不可见；#14 启动探测失败永不重试
+
+## [0.7.2] - 2026-08-25（R3 vselftest 审计修复：双成员 43 项发现）
+
+### Fixed（/vselftest AUDIT TRACK 双透镜审计，队长机械核验全部引用；B3 判假剔除、m1 降级 info）
+
+- **S2/M2（MAJOR）**：页面 state 含循环引用/BigInt 时页内序列化抛错 → 合法候选被误判 crashed —— 探针改为整体序列化失败时降级为「丢弃 state 保留行为证据」（`stateOmitted` 透出）
+- **S4/M1（MAJOR）**：Node 冒烟超时只杀直接子进程 + SIGTERM 陷阱候选挂死 —— SIGKILL 升级 + 硬回退 resolve（永不再挂到外层 10min）
+- **m2（MINOR）**：CDP `{id,error}` 错误形此前走 resolve 静默滑过（Page.navigate 失败仍在旧页面探针）→ 改为 reject，错误可见且逐文件崩溃记录
+- **S1（MINOR）**：frameId 跨同 tab 导航复用，M2 隔离前提不成立 —— 改为 context 代数归属（导航前 context 集合剔除旧文档迟到异常）
+- **S11/m8（MINOR）**：file URL 未百分号编码（空格/#/? 路径加载错误文件）→ 逐段 encodeURIComponent
+- **m3（MINOR）**：F-H 只剥带前缀首行，多行 stdoutTail 续行「错误:」仍伪造矛盾 —— build_evidence 尾部换行转义为 ⏎（整条单行可完整剔除）
+- **B1（MAJOR）**：目标尾部数字 1-8 被静默吞为 N（goal 截断）—— nSource 追踪，team 消息显式告警「尾部数字已作为 N」
+- **B2（MAJOR）**：打错文件名守卫需 ≥2 已存在文件，「2 文件错 1」仍翻转团队 —— 放宽为 ≥1 已存在
+- **B4（MAJOR）**：证据链超时杀但部分 evidence 存在 → 部分集当完整集 —— chainNote 显式标注「证据链未完整完成」
+- **B5（MAJOR）**：vselftest 激活指令硬编码 `E:\DeepSeek` 绝对路径 → 从 pluginRoot 派生
+- **B6（MINOR）**：unknown 候选多为 artifactName↔smokeRecord 契约漂移信号 → 报告显式告警
+- **B7/m11（MINOR）**：损坏 smoke.json 静默当 missing → stderr 诊断
+- **B8（MINOR）**：负面词正则误伤诚实自述（「未实现 X」）→ 收窄为整体否定形态
+- **B10/m10（MINOR）**：`/bestofn a.html b.html 5` 静默吞 N / `/bestofn a.html 5` 翻转团队 → parseArgs 拒绝吞「其余全像文件」的尾数 + handler 救援扩展
+- **B11（MINOR）**：`-n 0x10`/`-n 1e2` 被接受 → 仅十进制数字
+- **B12（MINOR）**：`--summary a=README.md` 首 token 文件形被拒 → 首 token 不按文件形中断
+- **B13（MINOR）**：bestofn/ 输出目录只增不减 → 保留最近 20 个清理
+- **B14（MINOR）**：「排名」按输入序非分数序 → 按分数降序展示
+- **B15（MINOR）**：团队模式静默丢弃 --summary/--quick → 透传给队长激活指令
+- **B18（MINOR）**：「冒烟=客观真值 L2」表述过强 → 限定「确认未崩溃，行为正确性未证明」
+- **B20（MINOR）**：单文件 `/bestofn a.html` → 团队 goal「a.html」→ 显式报错
+- **m4（MINOR）**：写盘失败中止整轮、node/html 症状不一致 → safeWrite 容错
+- **m5（MINOR）**：`--cdp-port abc`→NaN 端口；`--ticks 1e9`→浏览器长循环假 crashed → 端口校验 + ticks 封顶 10000
+- **m7（MINOR）**：重复候选不去重 → 本地模式 Set 去重
+- **S5（MINOR）**：复用外部 Chrome 导航用户第一个 tab → 新建独立 tab（/json/new）用完即关
+- **S6（MINOR）**：同 --out 并发实例证据互污染 → 排他锁文件
+- **S10（MINOR）**：截图失败仍 ok:true 且 note 宣称「已截图」→ 如实标注证据缺口
+- **S13（MINOR）**：stdout/stderr 无上限累积 → 64KB 滑动截断
+- **S14（MINOR）**：信号杀死 code=null 报「exit code null」→ 明确措辞
+- **S17（MINOR）**：自拉 Chrome 无 --user-data-dir → 临时 profile 避免与用户 Chrome 锁冲突
+- **S19（MINOR）**：artifactName 哈希 8→12 hex（32bit 碰撞）——smoke.mjs / build_evidence.mjs / 契约①/D-1 测试同步
+- **S20（MINOR）**：`/json` 探测无超时 → AbortSignal.timeout(3000)
+- **S23（MINOR）**：N10 的 `parsed?.error` 死条款移除（CDP 错误形状无 error 属性）
+- **S3（MAJOR 补修）**：rAF 自驱动页面双重驱动 + 时间压缩（dt≈0 假 NaN）→ ERR_COLLECTOR 注入 rAF 计数器（早于页面脚本），探针检测到自驱动即跳过手动 tick（`selfDriven` 透出到冒烟记录）
+- **S7（MAJOR 补修）**：采集器依赖页面可见全局（对抗候选 `window.__errs=[]` 可隐身）→ `Object.defineProperty` 非可写/不可配置，页面赋值静默失效，隐藏错误照常捕获（e2e 实测：对抗页抛错 → ok:false ✓）
+- **S9（MINOR 补修）**：固定 1500ms 等待，慢加载页未就绪即 probe-skip → 就绪轮询（3×500ms）
+- **S16（MINOR 补修）**：Node 候选并行执行（固定端口互抢假 crashed）→ 串行
+- **S18（MINOR 补修）**：目录展开仅一层 + 自冒烟风险 → 递归（深度≤3、≤200 文件、跳过 node_modules/.git）
+- **S21（MINOR 补修）**：重复 valued flag 静默首个胜出 → 显式告警
+- **S22（MINOR 补修）**：`--` 开头文件名无法冒烟 → 支持 `--` 分隔符（其后一律视为输入）；findArg 仅扫描选项区
+- **B16（MINOR 补修）**：runEvidenceChain 的 resolve() 与注释错位 → 注释修正（防御性 no-op）
+- **B17（MINOR 补修）**：超长 --summary 撞 Windows argv 上限 → >6000 字符落临时文件 + `@file:` 前缀（build_evidence 解引用）
+- 新增 10 条回归测试（B1/B8/B10/B11/B12/m3/m10/nSource）——测试 93/93 全绿
+
+### 记录
+- m9 结论：段头锚点保持字面全称，格式漂移由契约③ 测试守护（CI 断言两侧同字面）；不引入模糊容忍（容忍会把冒烟捕获组移位静默破坏核对——修复过程中实际踩到并回滚）
+- 双成员交叉审阅：path-tracer 对 B2 的否决因算术错误无效（B2 成立）；defect-hunter 对 m1 判假成立（路径不可达，理由表述有瑕疵）；B3 三方一致判假
+- 终评：verifier select("root_cause") unstable → compare 复核 A(攻击透镜) 0.973 vs B(逐路径) 0.818，A 胜出；B 的独有路径级发现（m2/m3/m4/m5/m7/m10）已并入本批修复
+
+## [0.7.1] - 2026-08-25（R2 审计 15 条发现全部修复）
+
+### Fixed
+- **F-A/N1（MAJOR）**：目录展开白名单与 smoke 对齐——`evidence_chain.mjs` SMOKABLE 含 `.htm` 而 `smoke.mjs` collectFiles 不含（DH-F1「白名单一致」不成立，`.htm` 目录候选铸幽灵证据块）；collectFiles 补 `.htm`
+- **F-D（MAJOR）**：CDP `send()` 不再永久挂起——每个请求带 30s 超时（与 Node 路径同语义），连接断开（onclose/onerror）时全部 pending 拒绝；HTML 冒烟逐文件 try/catch，单个候选失败产出 crashed 记录而非整 run 崩溃
+- **N10（MAJOR）**：渲染进程崩溃不再假 PASS——`Runtime.evaluate` 返回不可解析结果（`parsed.raw`）时显式 `ok:false`，不再落进「静态页无错误 → ok:true」分支
+- **N2（MAJOR）**：证据文本三态渲染——`build_evidence.mjs` 对 `kind=unsupported` 渲染「⏭️ 类型不支持（未执行，非崩溃）」并保留说明，不再谎报「❌ 失败」；bestofn 报告侧 `smokeState` 区分 unsupported/missing/unknown（F-G）
+- **F-C/N3（MAJOR）**：不再静默翻转 team 模式——`/bestofn a.html b.html 9`（尾部数字 >8）前序全为已存在文件时按本地对比处理并告警；多个已存在文件 + 缺失项形似路径时直接报错（打错文件名守卫）
+- **F-E（MINOR）**：导航失败检测——`Page.navigate` 返回 `errorText` 时显式 `ok:false`（此前不可加载页面被误报通过）
+- **N5（MINOR）**：frameId 归属改 fail-closed——frameId 未知的异常不再记到当前候选头上
+- **F-B（MINOR）**：显式 `--local` 下纯数字候选直接拒绝（此前生成幻影候选 `"9"`）；候选文件不存在时报错而非裸奔进证据链
+- **N4（MINOR）**：`-n` 必须是正整数——`-n 0.5` 不再 `Math.floor → 0`（"spawn exactly 0 members"）
+- **F-F/N6（MINOR）**：`--summary` 值在「形似文件路径」的 token 处停止——置于文件前不再吞掉后续候选
+- **N7（MINOR, REPORTED→FIXED）**：相对路径锚定会话工作区（`invocation.agent.session.header.cwd`），不再锚定 host 进程 cwd
+- **N8（MINOR）**：三个 CLI（smoke/build_evidence/evidence_chain/describe_visual）的 findArg 不再把 flag 形 token 当值吞掉
+- **F-H（TRIVIAL）**：声明-证据对照扫描剔除 `stdout/stderr(尾):` 原始行——日志文本含「错误:/❌」不再伪造矛盾
+- **F-I（TRIVIAL）**：`--summary` 值 trim 前导空格
+- **N9（INFO）**：重复 `--summary key` 覆盖时告警
+- 新增回归测试 `tests/r2-fix-regression.test.mjs`（12 条：parseArgs N4/N6/F-I/N9/N3/F-B + crossCheck F-H）
+
 ## [0.7.0] - 2026-08-24（第二轮深度审计修复 + 协议升级）
 
 ### Added

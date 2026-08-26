@@ -1,6 +1,6 @@
 // D-1 regression: evidence-chain key matching after F10 hash naming.
 // build_evidence must find smoke/describe files under their HASHED names
-// (`<stem>-<hash8>.smoke.json`) and attach per-candidate --summary keyed by
+// (`<stem>-<hash12>.smoke.json`) and attach per-candidate --summary keyed by
 // the RAW user name — both used to silently miss, leaving empty-shell blocks.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const ROOT = resolve(import.meta.dirname, '..')
-const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
+// S19: 哈希 12 hex，必须与 smoke.mjs / build_evidence.mjs 的 shortHash 一致（契约① 守护）
+const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 12)
 
 function run(inputs, args = []) {
   return spawnSync(process.execPath, [

@@ -56,7 +56,11 @@ function collectSummaries() {
 
 function findArg(name) {
   const i = process.argv.indexOf(name)
-  return i >= 0 ? i + 1 : -1
+  // N8: valued flag 后紧跟另一个 flag 时，flag 不被当作值吞掉（返回缺省）。
+  if (i < 0 || i + 1 >= process.argv.length) return -1
+  const val = process.argv[i + 1]
+  if (val.startsWith('--')) return -1
+  return i + 1
 }
 
 function readJson(file) {
@@ -99,12 +103,23 @@ function resolveRelated(base) {
 function renderSmoke(s) {
   if (!s) return '(无冒烟证据)'
   const lines = []
-  lines.push(`冒烟: ${s.ok ? '✅ 通过' : '❌ 失败'} [${s.kind}]`)
+  // N2: 三态渲染——unsupported（未执行，非崩溃）与失败（❌）必须区分，
+  // 否则 on-disk 的 unsupported 记录被谎报成"崩溃/失败"（U-N14 语义只在
+  // bestofn 侧做了，证据文本侧漏了）。
+  if (s.kind === 'unsupported') {
+    lines.push(`冒烟: ⏭️ 类型不支持（未执行，非崩溃） [${s.kind}]`)
+    if (s.note) lines.push(`说明: ${s.note}`)
+  } else {
+    lines.push(`冒烟: ${s.ok === true ? '✅ 通过' : s.ok === false ? '❌ 失败' : '❓ 无结果'} [${s.kind}]`)
+  }
   if (s.errors?.length) lines.push(`错误: ${s.errors.join('; ')}`)
   if (s.exitCode !== null && s.exitCode !== undefined) lines.push(`退出码: ${s.exitCode}`)
   if (s.timeout) lines.push(`超时: true`)
-  if (s.stdoutTail) lines.push(`stdout(尾): ${s.stdoutTail.slice(0, 400)}`)
-  if (s.stderrTail) lines.push(`stderr(尾): ${s.stderrTail.slice(0, 400)}`)
+  // m3: 尾部原始日志含换行——嵌入证据块后续行无前缀，crossCheck 的「剔除
+  // stdout/stderr 尾行」会漏掉续行 → 日志文本里的"错误:"伪造声明-证据矛盾。
+  // 统一把换行转义为 ⏎：整条尾巴只有一行，前缀剥离即可完整剔除。
+  if (s.stdoutTail) lines.push(`stdout(尾): ${s.stdoutTail.slice(0, 400).replace(/\r?\n/g, ' ⏎ ')}`)
+  if (s.stderrTail) lines.push(`stderr(尾): ${s.stderrTail.slice(0, 400).replace(/\r?\n/g, ' ⏎ ')}`)
   if (s.screenshot) lines.push(`截图: ${s.screenshot}`)
   if (s.state) lines.push(`状态: ${JSON.stringify(s.state)}`)
   return lines.join('\n')
@@ -124,8 +139,9 @@ function renderDescribe(d) {
 
 // F10: must match smoke.mjs's artifactName() exactly — stem + short hash of
 // the resolved ORIGINAL path — so same-basename candidates never collide.
+// S19: 哈希 12 hex 与 smoke.mjs 同步（8 hex 32bit 生日碰撞概率非零）。
 import { createHash } from 'node:crypto'
-const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8)
+const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 12)
 function artifactName(input) {
   // R3-19: when the input IS a .smoke.json/.describe.json, the original
   // artifact path is recorded in its `file` field — hashing the json path
@@ -176,7 +192,12 @@ async function main() {
     // (`甲-<hash8>`) — the hashed key never matched before, silently
     // dropping every per-candidate summary. Match BOTH forms.
     const stem = basename(input).replace(/\.(smoke|describe)\.json$/, '').replace(/\.[^.]+$/, '')
-    const summary = per.has(name) ? per.get(name) : per.has(stem) ? per.get(stem) : globalText
+    const rawSummary = per.has(name) ? per.get(name) : per.has(stem) ? per.get(stem) : globalText
+    // B17: `@file:<path>` 前缀引用——bestofn 对超长 summary 落临时文件后以此传递，
+    // 避免撞 Windows argv 上限；此处解引用为文件内容。
+    const summary = typeof rawSummary === 'string' && rawSummary.startsWith('@file:')
+      ? (readText(rawSummary.slice(6)) ?? rawSummary)
+      : rawSummary
     return buildBlock(input, summary)
   })
   if (AS_JSON) {

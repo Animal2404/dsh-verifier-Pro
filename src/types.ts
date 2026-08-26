@@ -80,6 +80,8 @@ export interface VerifierHistoryRecord {
   duration_ms?: number
   /** U-B2/U-B3: why a non-composite result was logged (unstable/budget/degraded). */
   note?: string
+  /** v0.7.3（评审 #5）：缓存命中标记——估算（中位数耗时）必须过滤这些 ~1ms 记录，避免水位/成本系统性低估。 */
+  cached?: boolean
 }
 
 /** One persisted async-task record (tasks.jsonl transitions). */

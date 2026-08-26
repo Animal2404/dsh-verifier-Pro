@@ -321,6 +321,30 @@ def test_profile_self_heal():
         bridge_fix._clear_degraded("deepseek-v4-pro")
 
 
+def test_partial_tag_loss_events():
+    print("[F2 partial-tag-loss visibility]")
+    # 完整 A+B 对：不产生部分丢失事件
+    bridge_fix._observe_score_tags("minimax-m3", "ok <score_A> A </score_A> <score_B> T </score_B>")
+    check("full pair records no partial loss",
+          bridge_fix.consume_partial_tag_losses() == 0)
+    # 单侧标签（另一侧缺失 → 官方字面回退 0.5）：记录 1 个样本事件
+    bridge_fix._observe_score_tags("minimax-m3", "ok <score_A> A </score_A>")
+    check("single-side tag records one lost sample",
+          bridge_fix.consume_partial_tag_losses() == 1,
+          str(bridge_fix.consume_partial_tag_losses()))
+    # 带任意标签仍自愈降级计数（语义不变，契约测试）
+    check("tagged reply still clears degradation streak",
+          not bridge_fix.is_degraded("muse-spark-1.2-contributor"))
+    # 窗口化 drain：since 之后才记录的事件保留
+    import time as _t
+    t0 = _t.monotonic()
+    bridge_fix.record_response_event("incomplete")
+    ev = bridge_fix.consume_response_events(t0)
+    check("windowed shape drain picks up event", ev.get("incomplete") == 1, str(ev))
+    check("legacy drain empty after windowed drain",
+          bridge_fix.consume_response_shape() is None)
+
+
 def main():
     print("=== bridge_fix offline tests ===")
     test_profiles()
@@ -328,6 +352,7 @@ def main():
     test_router_dispatch()
     test_reason_first()
     test_response_shape()
+    test_partial_tag_loss_events()
     test_profile_self_heal()
     test_repair_truncated_json()
     print(f"\noffline: {PASS} passed, {FAIL} failed")

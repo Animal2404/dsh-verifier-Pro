@@ -70,7 +70,11 @@ function collectSummaries() {
 
 function findArg(name) {
   const i = process.argv.indexOf(name)
-  return i >= 0 ? i + 1 : -1
+  // N8: valued flag 后紧跟另一个 flag 时，flag 不被当作值吞掉（返回缺省）。
+  if (i < 0 || i + 1 >= process.argv.length) return -1
+  const val = process.argv[i + 1]
+  if (val.startsWith('--')) return -1
+  return i + 1
 }
 
 function run(script, args) {

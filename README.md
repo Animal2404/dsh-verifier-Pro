@@ -17,7 +17,7 @@
 
 ```
 DSH Agent
-  ↓ verifier 工具（单一工具 × 11 action：select/compare/track/decompose/evaluate_session/progress_*/task_*/usage）
+  ↓ verifier 工具（单一工具 × 12 action：select/compare/track/decompose/evaluate_session/progress_*/task_*/usage/config）
 dsh-verifier-Pro (Node/TS host plugin)
   ↓ JSON Lines over stdio (id-correlated, concurrent)
 bridge/verifier_brain_bridge.py (ThreadPool × N)
@@ -34,7 +34,7 @@ llm-verifier 0.2.0 (official PyPI package)
 | 进度跟踪 | `verifier` action=`progress_*` | 每步实时打分；持续 <0.05 = 方向可能错了 |
 | 质量门禁 / RL | `verifier` action=`compare` / `track` / 分数落盘 | 成对评审、整轨迹复盘、reward 数据导出 |
 
-一个工具，十一个 action：`select` / `compare` / `track` / `decompose` / `evaluate_session` / `progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status` / `usage`。对 agent 说 "verifier compare 一下" 即可。
+一个工具，十二个 action：`select` / `compare` / `track` / `decompose` / `evaluate_session` / `progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status` / `usage` / `config`。对 agent 说 "verifier compare 一下" 即可。
 
 ## 安装
 
@@ -46,13 +46,32 @@ llm-verifier 0.2.0 (official PyPI package)
 git clone https://github.com/Animal2404/dsh-verifier-Pro.git
 cd dsh-verifier-Pro
 node scripts/setup.mjs --check    # 诊断：告诉你缺什么、推荐适合你凭据的评分后端配置
-node scripts/setup.mjs --fix      # 自动修复：建 .venv + 安装 llm-verifier
+node scripts/setup.mjs --fix      # 全自动：建 .venv → 装 llm-verifier → 双写推荐配置 →
+                                  #         构建 lib/ → 挂载到 profile（默认 web）
 ```
+
+`--fix` 跑完即完成全部六步：① 创建 .venv → ② pip 安装 llm-verifier → ③ 复核 →
+④ 把适合你凭据的 `verifierModel` / `backendBaseUrl` **双写**到仓库补丁和 profile 补丁
+（实际生效层，见「配置详解」）→ ⑤ `npm run build` 构建 lib/ → ⑥ 检测到 dsh CLI 时自动
+执行 `dsh plugin --profile web add <目录>`。然后**重启 dsh** 即生效；Web 页面如已打开，
+**刷新一次浏览器标签**以加载面板 bundle。
+
+常用旗标：
+
+| 旗标 | 作用 |
+|---|---|
+| `--profile <名称>` | 挂载目标 profile（默认 `web`） |
+| `--no-mount` | 只做到构建为止，不自动挂载 |
+| `--check --strict` | 存在待处理项时 exit 1（CI/脚本化预检用；普通 `--check` 恒 exit 0） |
+| `--bench` | 判别力自检（见下文 G1 小节）：换评分模型后的质量回归门 |
 
 `--check` 会根据你在 `~/.dsh/.credentials.yaml` 里已有的凭据**自动推荐评分后端配置**
 （有 DEEPSEEK_API_KEY → 推荐 deepseek-chat @ api.deepseek.com；有 OPENCODE_GO_API_KEY →
 推荐 opencode + deepseek-v4-flash-vision-exp；都没有 → 给出申请地址），并直接对比当前硬编码值，
-把"装完不能直接用"的根源指出来。按它给的片段改 `cordis.patch.yml` 两行即可适配你的环境。
+把"装完不能直接用"的根源指出来。
+
+> 💡 **30 秒冒烟**：装完重启 dsh 后，对 agent 说「用 verifier 对比一下 X 和 Y 哪个好」——
+> 能看到 verifier compare 工具卡片（分数 + 徽章）就是活的。
 
 ### 手动安装（等效于 --fix 做的事）
 
@@ -62,12 +81,19 @@ python -m venv .venv
 .venv/Scripts/python -m pip install llm-verifier     # Windows
 # .venv/bin/python -m pip install llm-verifier        # macOS/Linux
 
-# 2) 构建
-bash scripts/build.sh
+# 2) 构建（纯 Node 入口，Windows 无需 bash；build.sh 保留给 bash 用户）
+npm run build
 
 # 3) 挂载到 profile（重启 dsh 生效）
 #    或用 dsh plugin --profile web add <this package>
 ```
+
+> **开发装配说明（重要）**：本仓库的开发安装依赖 DSH 宿主注入器的 junction 机制——`node_modules` 里
+> 的 `cordis`/`cosmokit`/`schemastery` 与 `@deepseek-ai/dsh-llm` 等 peer 是**指向宿主全局安装的链接**
+> （保证插件始终用宿主同版本 API），`react`/`tsdown`/`typescript` 链接到本地 `.pnpm` 虚拟存储。
+> 因此：**`npm ci`/`npm install` 不是受支持的装配方式**（`package-lock.json` 未入库、不包含 peer 树）；
+> 本地开发用 `dev_install_package` / 超级模组注入器挂载即可。**宿主升级大版本后**，这些 junction 的
+> 目标路径会变化，需重新注入/重挂一次（`dev_reload_package` 或重新 `dev_inject_plugin`）。
 
 ### 评分后端配置（重要！）
 
@@ -76,7 +102,7 @@ bash scripts/build.sh
 
 | 你有的凭据 | verifierModel | backendBaseUrl | 实测状态 |
 |---|---|---|---|
-| `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` | ✅ 推荐 |
+| `DEEPSEEK_API_KEY`（DeepSeek 官方） | `deepseek-chat` | `https://api.deepseek.com` | ✅ 推荐（logprobs 分布未在本仓实测，建议先跑 probe 验证） |
 | `OPENCODE_GO_API_KEY`（opencode） | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ 实测可评分 |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | 未验证 logprobs |
 
@@ -102,7 +128,7 @@ bash scripts/build.sh
 > 修复。默认模型无需更换。
 
 要求：所选模型必须支持 **logprobs 返回**（这是细粒度 reward 的根基）。跑一次
-`.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>` 可验证你的端点是否返回 logprobs；
+`.venv/Scripts/python scripts/probe_logprobs.py <base_url> <api_key> <model>` 可验证你的端点是否返回 logprobs；
 或用 `.venv/Scripts/python scripts/scan_logprob_models.py <你的key>` 批量扫描候选模型
 （macOS/Linux 用 `.venv/bin/python`）。
 
@@ -193,9 +219,14 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
       name: '@dsh-external/dsh-verifier-pro'
       config:
         bridgeTimeoutMs: 300000
+        taskTimeoutMs: 1800000
         verifierModel: deepseek-v4-flash-vision-exp
+        backendBaseUrl: https://opencode.ai/zen/go/v1   # 按你持有的凭据修改（见下表）
         maxWorkers: 4
         promptSection: true
+        autoEscalate: true
+        escalateThreshold: 0.15
+        maxEscalateK: 3
 ```
 
 | 项 | 默认 | 说明 |
@@ -211,6 +242,9 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 | `maxCostPerVerification` | `0` (无限制) | 单次验证最大成本（美元）—— **v0.6.0 起已实现预算拦截**：基于 history 真实耗时×费率估算，超预算拒绝；**v0.7.0 起覆盖全部评分路径**（同步 select/compare/track、异步 task_start、服务缝、/bestofn） |
 | `costPer1kInputTokens` | `0` | 每 1K 输入 token 成本（美元），预算拦截的费率输入 |
 | `costPer1kOutputTokens` | `0` | 每 1K 输出 token 成本（美元），用于成本估算 |
+| `autoEscalate` / `escalateThreshold` / `maxEscalateK` | `true` / `0.15` / `3` | 自适应验证缩放（分差落噪声带自动 K 重评） |
+| `escalationModel` | 空 = 同 verifierModel | 分级评分：仅升级轮使用的更强模型 |
+| `maxWorkers` 并发语义 | — | 既限桥请求并发，也作为官方内层打分 fan-out 的默认 `max_workers`（v0.7.4 起）；显式传参可到 16 |
 
 ### 配置详解（这个文件是干嘛的、怎么改）
 
@@ -227,9 +261,31 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 1. **改 profile 补丁**（推荐）：编辑 `~/.dsh/profiles/<profile>/cordis.patch.yml`，对 `verifier-brain` 条目覆盖字段。改完重启 dsh 生效。
 2. **改插件自带的补丁**：直接改本文件后重新安装——会作为 bundle patch 应用到所有装它的 profile。
 
+**凭据 → 后端解析机制（M-6：改了 backendBaseUrl 之后 key 从哪来）**
+
+桥进程的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 按以下优先级合成（显式者永远覆盖自动探测）：
+
+1. **插件配置显式值**（最高）：`cordis.patch.yml` 的 `backendBaseUrl` / `backendApiKey`——这就是你的后端选择；
+2. **凭据文件** `~/.dsh/.credentials.yaml`：识别已知键名，兼容三种写法（扁平 `KEY: value`、
+   `refs:` 节下缩进键、`provider:` + `api_key:` 嵌套节）；
+3. **环境变量同名键**。
+
+**baseUrl ↔ 凭据键的绑定关系**（与 setup.mjs 内置映射一致；自建端点必须显式填 `backendApiKey`）：
+
+| 你配置的 `backendBaseUrl` | 桥找哪个 key |
+|---|---|
+| `https://opencode.ai/zen/go/v1` | `OPENCODE_GO_API_KEY`（别名转发为 OPENAI_API_KEY + 该 baseUrl） |
+| `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| 其他（Vertex/Gemini/自建） | `OPENAI_API_KEY` / `VERTEX_API_KEY` / `GEMINI_API_KEY` 或显式 `backendApiKey` |
+
+规则细节：同时持有多家凭据时，原生 provider 键优先于 opencode 别名——除非你把
+`backendBaseUrl` 显式指到 opencode（此时该代理的凭据胜出，例如 DeepSeek 欠费时切过去）。
+跑 `verifier usage` action 的 `config` 回显可查看当前生效组合。
+
 **切换 LLM 后端的步骤**（例如从 opencode 切到 DeepSeek 官方）：
 1. 确认 `~/.dsh/.credentials.yaml` 里有对应凭据（`DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` / `VERTEX_API_KEY`）
-2. 改 `backendBaseUrl` + `verifierModel` 指向目标后端（表见「后端对照」节）
+2. 改 `backendBaseUrl` + `verifierModel` 指向目标后端（表见「评分后端配置」节）
 3. 重启 dsh
 4. 跑一次 `compare` 验证：`probe` 会先探测 logprobs 支持，不支持的后端会直接报错（不烧钱）
 
@@ -245,11 +301,41 @@ node scripts/build_evidence.mjs <artifact> ...        # 证据拼接："候选�
 # 钉扎到特定 commit（推荐）
 dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro#a1b2c3d
 
-# 或钉扎到 tag（如 v0.4.2）
-dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
+# 或钉扎到 tag（用【最新已发 tag】，见 Releases 页）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@<最新已发tag>
 ```
 
 > ⚠️ 不加 `#commit` 或 `#tag` 将始终拉取最新 main，可能引入破坏性变更。
+
+## 升级与卸载
+
+**升级**（M-3）：
+
+```sh
+# 方式一：钉扎安装的——重跑 add 命令指到新 tag（推荐始终钉扎）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@<最新 tag>
+
+# 方式二：clone 安装的——拉取后重建并重新挂载
+cd dsh-verifier-Pro
+git pull
+node scripts/setup.mjs --fix        # 会重建 .venv 依赖、lib/ 并重新挂载
+```
+
+发布说明看 [Releases 页](https://github.com/Animal2404/dsh-verifier-Pro/releases)；
+`main` 分支可能包含未发版变更，生产使用请钉扎最新已发布 tag。
+
+**卸载与残留清理**（M-4 缩水项：本插件安装足迹比参考项目多几类，如实列出）：
+
+| 残留物 | 位置 | 清理方式 |
+|---|---|---|
+| profile 补丁条目 | `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `- id: verifier-brain` 条目 | 手动删除该条目 |
+| 安装副本 | profile 包目录内的插件目录 | `dsh plugin remove` 或删目录 |
+| **评分历史（含提交给评分模型的候选全文，敏感）** | `~/.dsh/verifier-brain/history.jsonl`、`tasks.jsonl` | 删除整个 `~/.dsh/verifier-brain/` 目录 |
+| Python 虚拟环境 | clone 目录下的 `.venv/` | 删除该目录 |
+| 补丁备份 | `cordis.patch.yml.bak.*`（--fix 写配置时产生，保留最近 3 份） | 手动删除 |
+
+> 🔒 隐私提示：`history.jsonl` 含候选全文与评分结果（SECURITY.md「评分数据出域」同源数据），
+> 卸载插件不会自动清除；不再需要审计时建议删除。
 
 ## 性能基准（实测，非估算）
 
@@ -304,7 +390,7 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 |---|---|---|
 | 工具不存在 / 未注册 | 插件未装配 | 检查 `cordis.patch.yml` 的 insert 条目；重启 dsh |
 | 改配置不生效 | 配置加载时读取 | **重启 dsh**（热重载不重读配置）|
-| `Cannot find module` | 依赖链接缺失 | 重跑 `scripts/build.sh`（会重建 node_modules 链接）|
+| `Cannot find module` | 依赖链接缺失 | 重跑 `npm run build`（纯 Node 入口 scripts/build.mjs，会重建 node_modules 链接）|
 
 > 通用排查顺序：**先看错误信息是哪层的**（401/400=后端，timeout/Connection=桥，module/未注册=宿主），
 > 别从 Node 环境开始猜。`setup.mjs --check` 会一次性诊断后端凭据 + .venv + lib 产物。
@@ -320,22 +406,31 @@ dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.4.2
 ## 端到端示例（从装到用）
 
 ```bash
-# 1) 安装（推荐钉扎）
-dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@v0.7.0
+# 1) 安装（推荐钉扎；稳定版用【最新已发 tag】——见 Releases 页，勿凭记忆写版本号）
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@<最新已发tag>
+# 或 clone 后一键闭环（含构建+挂载，见「一键安装」节）：
+#   git clone https://github.com/Animal2404/dsh-verifier-Pro.git && cd dsh-verifier-Pro
+#   node scripts/setup.mjs --fix
 
-# 2) 检查环境（凭据 + .venv + 产物一次诊断）
-cd E:/DeepSeek/dsh-verifier-brain && node scripts/setup.mjs --check
+# 2) 检查环境（在【你 clone 或安装】的插件目录里跑，路径按实际情况替换；
+#    setup.mjs 会自动向上定位项目根，也可以用 --root 显式指定）
+node scripts/setup.mjs --check
 
-# 3) 重启 DSH 让配置生效
+# 3) 重启 DSH 让配置生效（配置在加载时读取）；Web 页面如已打开，刷新一次浏览器标签
 # 4) 在任意会话让 agent 调用 verifier（说人话即可）：
 #    "用 verifier 对比这两个方案哪个好" → compare
 #    "给这三个实现排个名"            → select
 #    "复盘这条轨迹哪里有问题"        → decompose
 #    "给这段会话打个分"              → evaluate_session
+#    "当前生效的 verifier 配置是什么"  → config（只读回显）
 
 # 5) 面板：工具结果以卡片显示（徽章/分数/验证锚定等级/采样提示）
 # 6) 需要审计时：评分历史在 ~/.dsh/verifier-brain/history.jsonl
 ```
+
+> ⚠️ **三份 cordis.patch.yml 的关系**（F-2）：① 你 clone 目录里的（`setup.mjs --fix` 写它）→
+> ② `dsh plugin add` 随包分发进 profile 包目录的副本 → ③ `~/.dsh/profiles/<profile>/cordis.patch.yml`
+> 是**实际生效层**、覆盖前两者。改配置认准 ③；`--fix` 会把推荐配置同时写进 ① 和 ③（存在才写）。
 
 ### criteria 写法（重要）
 
@@ -365,6 +460,25 @@ verifier select criteria="deep_review" problem="哪个实现更好？" candidate
 ```
 
 未知名（如 `terminal_bench`）原样透传给官方包，行为不变。
+
+**criteria `.md` 模板库（热加载，v0.7.4 起）**：`criteria/` 目录下的 `.md` 文件即模板——
+`## 标准名` 二级标题为维度、正文为描述；传模板名即加载（如 `criteria="code_review"`）。
+**每次评分即读盘，改完立即生效，无需重启**；目录里的 `deep_review.md` / `root_cause.md`
+优先于代码内置同名预设（删文件即回退）。格式与示例见 `criteria/TEMPLATE.md`。
+
+**判别力自检基准（G1，换模型后的质量回归门）**：probe 只验「能不能评」，不验「评得好不好」。
+固定微任务集 A/B 对照（粗判别/细判别/中文/跑题拒绝，各 1 次 compare）实测评分方向是否正确：
+
+```sh
+node scripts/setup.mjs --bench     # 或直接: .venv/Scripts/python scripts/discriminative_check.py
+python scripts/discriminative_check.py --model <你的模型> --base-url <你的端点> --key <key>
+```
+
+全部方向判定正确 exit 0；换评分模型后应跑一次。RELEASING 清单在更换默认评分模型时必跑。
+
+> ✅ **默认模型实测（2026-08-26）**：`deepseek-v4-flash-vision-exp` @ opencode **4/4 全过**
+> （粗判别 +1.000 · 细判别 +0.106 · 中文 +0.991 · 跑题拒绝 +1.000）。多模态 `images` 亦于同日
+> 首次真实验证：红蓝方块带图 select 正确择红（scores 0.654 / 0.346）。
 
 ## 参考项目
 
@@ -399,7 +513,7 @@ verifier select criteria="deep_review" problem="哪个实现更好？" candidate
 
 - `scripts/probe_logprobs.py` — 探测任意 OpenAI 兼容端点是否返回 logprobs
 - `scripts/e2e_bridge_test.py` — 桥全流程端到端测试（单进程，含 ProgressTracker）
-- `scripts/acceptance_ts.mjs` — 自适应升级十用例验收回归（ITERATION_PLAN §3）
+- `scripts/acceptance_ts.mjs` — 自适应升级十用例验收回归（原 ITERATION_PLAN §3，已归档至 docs/HISTORY.md）
 - `scripts/evidence_chain.mjs` — 证据链一键端到端（冒烟→视觉描述→证据拼接）
 - `scripts/smoke.mjs` — 泛化冒烟（HTML/CDP 与 Node.js 两类）
 - `scripts/describe_visual.mjs` — 五维视觉描述（色彩/氛围/细节密度/风格化/第一印象）

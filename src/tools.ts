@@ -18,7 +18,7 @@ import type { Context } from 'cordis'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { existsSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { LRUCache, Semaphore } from './concurrency.js'
 import type { PythonBridge } from './bridge.js'
@@ -127,6 +127,41 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
   return trimmed
 }
 
+/** G3（复盘 R-refcomp）：criteria .md 模板热加载——对标官方 criteria/ 目录。
+ * 格式：`## 标准名` 二级标题为维度名，标题下的正文为该维度的描述；`# 一级标题`
+ * 与散落散文忽略。每次评分调用即读盘（µs 级），用户改模板无需重启。 */
+export function parseCriteriaDoc(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  let cur: string | null = null
+  let buf: string[] = []
+  const flush = (): void => {
+    if (cur && buf.join('').trim()) out[cur] = buf.join('\n').trim()
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^##\s+(.+?)\s*$/.exec(line)
+    if (m) {
+      flush()
+      cur = m[1]
+      buf = []
+    } else if (cur) {
+      buf.push(line)
+    }
+  }
+  flush()
+  return Object.keys(out).length > 0 ? out : (undefined as unknown as Record<string, string>)
+}
+
+function loadCriteriaDoc(dir: string | undefined, name: string): Record<string, string> | null {
+  if (!dir) return null
+  // 名字白名单化：只允许文件名字符，防路径穿越（criteria 名来自模型输入）。
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return null
+  try {
+    return parseCriteriaDoc(readFileSync(join(dir, `${name}.md`), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 /**
  * 深度导向内置 criteria 预设：通用 Correctness/Completeness/Clarity 三件套
  * 奖励广度、惩罚洞察——LLM 评委天然偏袒「面面俱到的浅层候选」，压过
@@ -149,15 +184,33 @@ const CRITERIA_PRESETS: Record<string, Record<string, string>> = {
   },
 }
 
-/** Expand built-in criteria preset names ("deep_review" / "root_cause") into
- * description objects. Called at the top of runSelect/runCompare — the single
- * choke point shared by sync tools, async task_start, the service seam and
- * /bestofn — so the presets work on EVERY path. Unknown names pass through
+/** Expand built-in criteria preset names ("deep_review" / "root_cause" —
+ * 内置代码预设，或 criteria/ 目录下的同名 .md 模板，目录优先便于用户覆盖)
+ * into description objects. Called at the top of runSelect/runCompare — the
+ * single choke point shared by sync tools, async task_start, the service seam
+ * and /bestofn — so the presets work on EVERY path. Unknown names pass through
  * unchanged (official package presets like terminal_bench still work). */
-export function expandCriteria(criteria: Criteria | undefined): Criteria | undefined {
+export function expandCriteria(criteria: Criteria | undefined, criteriaDir?: string): Criteria | undefined {
   if (typeof criteria === 'string') {
-    const preset = CRITERIA_PRESETS[criteria.trim()]
+    const name = criteria.trim()
+    const doc = loadCriteriaDoc(criteriaDir, name)
+    if (doc) return doc
+    const preset = CRITERIA_PRESETS[name]
     if (preset) return { ...preset }
+    return criteria
+  }
+  // v0.7.3（外部评审 #3）：数值/权重对象的拒绝收到这个唯一收口（runSelect/
+  // runCompare 顶部都调用本函数），覆盖「服务缝/对象路径」——此前 parseCriteria
+  // 只在同步字符串路径拦，服务缝传对象会原样透传 → 官方包把 0.5 字符串化成
+  // 无意义描述（D-2 要防的静默错评）。
+  if (criteria && typeof criteria === 'object' && !Array.isArray(criteria)) {
+    const obj = criteria as unknown as Record<string, unknown>
+    const values = Object.values(obj)
+    if (values.length > 0 && values.every((v) => typeof v === 'number')) {
+      throw new Error(
+        'criteria as a numeric/weight object is not supported: the llm-verifier backend treats criteria values as descriptions, so weights would silently become meaningless strings. Use a description object instead, e.g. {"Correctness": "checks the output is factually right"}',
+      )
+    }
   }
   return criteria
 }
@@ -291,13 +344,29 @@ function detectAnomalousShape(scores: unknown[], kind: 'compare' | 'select'): { 
     return { shape: 'non_finite', hint: '评分包含 NaN/非有限值——评分器输出异常，结果不可用' }
   }
   if (nums.length === 0) return null
-  // 2) 全 0.5（tie 掩蔽批量失败，compare/select 均适用）
+  // 2) 全 0.5（tie 掩蔽批量失败；归因按路径区分——F12：官方 compare 没有
+  //    on_error 参数（失败即 raise），compare 路径出现静默 0.5 的真机制是
+  //    extract_score 对无标签回复的字面回退）
   if (nums.every((n) => n === 0.5)) {
-    return { shape: 'exact_flat', hint: '全部候选精确等于 0.5——评估批量失败被 on_error="tie" 掩蔽的特征，不是真实平局' }
+    return {
+      shape: 'exact_flat',
+      hint: kind === 'compare'
+        ? '全部候选精确等于 0.5——官方 extract_score 对无标签回复的字面回退值就是 0.5（compare 路径没有 on_error 掩蔽机制），通常是评分批量失败的特征'
+        : '全部候选精确等于 0.5——评估批量失败被 on_error="tie" 掩蔽的特征，不是真实平局',
+    }
   }
-  // 3) 全挤极端（≥2 个候选且全部 ≥0.95 或全部 ≤0.05）——「给分随意」退化
-  if (nums.length >= 2 && (nums.every((n) => n >= 0.95) || nums.every((n) => n <= 0.05))) {
-    return { shape: 'degenerate_extreme', hint: '所有分数挤在同一极端（≥0.95 或 ≤0.05）——疑似评分器给分随意/退化，区分度存疑' }
+  // 3) 全挤极端（≥2 个候选且全部 ≥0.95 或全部 ≤0.05）且**无区分度**（极差 <0.02）
+  //    ——「给分随意」退化。v0.7.3（评审 #7）：两个候选确实双优（0.97/0.96）会
+  //    误伤真实共识——加区分度条件，只有挤在同一极端且彼此几乎无差的才算退化。
+  if (nums.length >= 2) {
+    const allHi = nums.every((n) => n >= 0.95)
+    const allLo = nums.every((n) => n <= 0.05)
+    if (allHi || allLo) {
+      const spread = Math.max(...nums) - Math.min(...nums)
+      if (spread < 0.02) {
+        return { shape: 'degenerate_extreme', hint: `所有分数挤在同一极端（≥0.95 或 ≤0.05）且极差 <0.02（${allHi ? '全高' : '全低'} ${spread.toFixed(3)}）——疑似评分器给分随意/退化，区分度存疑` }
+      }
+    }
   }
   return null
 }
@@ -322,27 +391,85 @@ export interface EscalationDeps {
   maxCostPerVerification?: number
   costPer1kInputTokens?: number
   costPer1kOutputTokens?: number
+  /** G3: criteria .md 模板目录（热加载；未配置时只用内置预设）。 */
+  criteriaDir?: string
 }
 
-/** #11: reject a scoring call when recent real spend × rates already exceeds
- * the configured budget. kind-specific (select/compare/track have different
+/** #11: reject a scoring call when its single-call cost estimate exceeds the
+ * configured budget. kind-specific (select/compare/track have different
  * per-call costs). Called from runSelect/runCompare/track — the single choke
- * points every path flows through. */
+ * points every path flows through.
+ *
+ * v0.7.3（外部评审 #2）：改回文档语义「单次验证最大成本」——只按本次单次估算
+ * 拦截。旧实现把「最近 20 条同 kind 的累计 + 本次」叠加，同 kind 攒满 20 条后
+ * 累计极易超小额预算 → 之后所有调用被拒；且被拒调用不写 history → 窗口冻结在那
+ * 20 条上 → 永久锁死（只能改配置或手删 history.jsonl 解锁）。单次拦截既匹配
+ * 文档，也不再有窗口冻结问题。
+ *
+ * G2（复盘 R-refcomp）：估算优先用真实 token 计量——桥的 usage action 暴露官方
+ * token_usage() 累计值，gatedRequest 在每次评分前后各读一次，差值进按 kind 的
+ * 滑动平均；无计量数据时退回「时长×启发式速率」粗估。取两种估算的较大值，
+ * 护栏保持保守。 */
+const REAL_TOKEN_STATS: Record<string, { n: number; avgIn: number; avgOut: number }> = {}
+const TOKEN_EMA_ALPHA = 0.3
+
+async function readTokenUsage(deps: EscalationDeps): Promise<{ input_tokens?: unknown; output_tokens?: unknown } | null> {
+  try {
+    // 本地进程查询（毫秒级、零 API 计费）；失败静默 → 退回时长粗估。
+    const bridge = await deps.getBridge()
+    const r = await bridge.request<{ usage?: { input_tokens?: unknown; output_tokens?: unknown } }>('usage', {}, 5_000)
+    return r?.usage ?? null
+  } catch {
+    return null
+  }
+}
+
+function recordTokenDelta(
+  kind: string,
+  before: { input_tokens?: unknown; output_tokens?: unknown } | null,
+  after: { input_tokens?: unknown; output_tokens?: unknown } | null,
+): void {
+  if (!before || !after) return
+  const dIn = Number(after.input_tokens) - Number(before.input_tokens)
+  const dOut = Number(after.output_tokens) - Number(before.output_tokens)
+  if (!Number.isFinite(dIn) || !Number.isFinite(dOut) || (dIn <= 0 && dOut <= 0)) return
+  const s = REAL_TOKEN_STATS[kind] ??= { n: 0, avgIn: 0, avgOut: 0 }
+  s.n += 1
+  if (s.n === 1 || !Number.isFinite(s.avgIn)) {
+    s.avgIn = Math.max(0, dIn)
+    s.avgOut = Math.max(0, dOut)
+  } else {
+    s.avgIn = s.avgIn * (1 - TOKEN_EMA_ALPHA) + Math.max(0, dIn) * TOKEN_EMA_ALPHA
+    s.avgOut = s.avgOut * (1 - TOKEN_EMA_ALPHA) + Math.max(0, dOut) * TOKEN_EMA_ALPHA
+  }
+}
+
 async function costGuard(deps: EscalationDeps, kind: 'select' | 'compare' | 'track'): Promise<void> {
   const maxCost = deps.maxCostPerVerification
   const costInRate = deps.costPer1kInputTokens ?? 0
   const costOutRate = deps.costPer1kOutputTokens ?? 0
   if (!maxCost || maxCost <= 0 || (costInRate <= 0 && costOutRate <= 0)) return
+  const estimates: number[] = []
+  // G2: 实测路径（真实每调用 token 均值 × 配置费率）。
+  const stats = REAL_TOKEN_STATS[kind]
+  if (stats && stats.n > 0 && Number.isFinite(stats.avgIn)) {
+    estimates.push((stats.avgIn / 1000) * costInRate + (stats.avgOut / 1000) * costOutRate)
+  }
+  // 时长粗估兜底（首调用无计量数据时仍受保护）。
   const recent = deps.store.readHistory(20)
-    .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
-  if (recent.length === 0) return
-  const medianMs = recent.map((r) => r.duration_ms as number).sort((a, b) => a - b)[Math.floor(recent.length / 2)]
-  // 粗估：1 秒 ≈ 300 input token + 100 output token（保守量级），按费率折现。
-  const rate = (300 * costInRate + 100 * costOutRate) / 1000
-  const estUsd = (medianMs / 1000) * rate
-  const spentUsd = (recent.reduce((s, r) => s + (r.duration_ms as number), 0) / 1000) * rate
-  if (spentUsd + estUsd > maxCost) {
-    throw new Error(`verifier 成本预算拦截：本次估算 ~$${estUsd.toFixed(4)}，累计 ~$${spentUsd.toFixed(4)} 超预算 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
+    .filter((r) => r.kind === kind && r.cached !== true && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
+    // v0.7.3（评审 #5）：`cached !== true` ——缓存命中（~1ms）也照常 appendHistory，
+    // 不过滤会让中位数被拉向 0 → 成本/水位估计系统性低估。
+  if (recent.length > 0) {
+    const medianMs = recent.map((r) => r.duration_ms as number).sort((a, b) => a - b)[Math.floor(recent.length / 2)]
+    const rate = (300 * costInRate + 100 * costOutRate) / 1000
+    estimates.push((medianMs / 1000) * rate)
+  }
+  if (!estimates.length) return
+  const estUsd = Math.max(...estimates)
+  // 单次拦截：仅按本次估算判断，不再叠加最近窗口累计（评审 #2）。
+  if (estUsd > maxCost) {
+    throw new Error(`verifier 成本预算拦截：本次单次估算 ~$${estUsd.toFixed(4)} 超过单次上限 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
   }
 }
 
@@ -365,6 +492,9 @@ function literalMcNotes(scoreMode: unknown, margin: number): { note?: string; wa
 /**
  * Bridge request under the scoring semaphore (when configured).
  * All expensive select/compare/tournament calls must go through this.
+ * G2: real scoring calls are wrapped with usage metering (before/after token
+ * deltas feed the per-kind EMA that costGuard prefers over the duration
+ * heuristic). usage reads are local process queries — no API spend.
  */
 async function gatedRequest<T>(
   deps: EscalationDeps,
@@ -374,7 +504,12 @@ async function gatedRequest<T>(
 ): Promise<T> {
   const bridge = await deps.getBridge()
   const exec = () => bridge.request<T>(method, params, deps.budgetMs(), signal)
-  return deps.scoringGate ? deps.scoringGate.run(exec, signal) : exec()
+  const run = () => (deps.scoringGate ? deps.scoringGate.run(exec, signal) : exec())
+  if (method !== 'select' && method !== 'compare' && method !== 'track') return run()
+  const before = await readTokenUsage(deps)
+  const result = await run()
+  recordTokenDelta(method, before, await readTokenUsage(deps))
+  return result
 }
 
 /** Median duration of recent scoring calls OF THE SAME KIND, from persisted
@@ -382,7 +517,7 @@ async function gatedRequest<T>(
  * the estimate — select tournaments are ~4× slower than compares). */
 async function estimateCallMs(deps: EscalationDeps, kind: 'select' | 'compare'): Promise<number> {
   const durs = deps.store.readHistory(50)
-    .filter((r) => r.kind === kind && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
+    .filter((r) => r.kind === kind && r.cached !== true && typeof r.duration_ms === 'number' && (r.duration_ms as number) > 0)
     .map((r) => r.duration_ms as number)
     .sort((a, b) => a - b)
   if (!durs.length) return kind === 'select' ? 37_000 : 11_000
@@ -395,7 +530,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   p.n_evaluations = boundParam(p.n_evaluations, MAX_N_EVALUATIONS)
   // 深度预设：criteria 名称（deep_review/root_cause）在此统一展开——
   // 同步工具/异步 task_start/服务缝/bestofn 全路径共用这一处。
-  p.criteria = expandCriteria(p.criteria)
+  p.criteria = expandCriteria(p.criteria, deps.criteriaDir)
   // 传输层加固：候选/问题过 sanitize（长度上限 + 控制符剥离 + 注入短语中性化）。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeA = sanitizeForVerifier(p.candidate_a)
@@ -465,7 +600,10 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
         cached: k1WasCached,
         escalated: false,
         signal: 'degraded',
-        warning: '⚠️ 双侧得分精确等于 0.5 —— 这是评估失败被 on_error="tie" 掩蔽的特征，不是真实平局。建议换模型重试或人工复核。',
+        // F12（复盘 R-refcomp）：官方 compare 没有 on_error 参数（失败即 raise）——
+        // 静默 0.5/0.5 的真机制是 extract_score 对无标签回复的字面回退，归因文案
+        // 不能引导用户去找不存在的 on_error 配置。
+        warning: '⚠️ 双侧得分精确等于 0.5 —— 官方 extract_score 对无标签回复的字面回退值就是 0.5（compare 路径没有 on_error 掩蔽机制），这通常是评分批量失败的特征，不是真实平局。建议换模型重试或人工复核。',
       }
     }
     const flat = Number.isFinite(marginBefore) && marginBefore <= FLAT_EPSILON
@@ -521,7 +659,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   for (let i = 2; i <= 1 + extraReps; i++) {
     const swap = i % 2 === 0
     try {
-      let r = await gatedRequest<Record<string, unknown>>(deps, 'compare', mkRepParams(swap), signal)
+      // F11（复盘 R-refcomp）：升级 reps 也进 in-flight 缓存——两个同参调用几乎
+      // 同时到达且都命中升级条件时，k1 共享而 reps 各跑一份会双倍烧钱。缓存键
+      // 含轮次/交换态/升级模型，与 k1 的 ':k1' 键空间隔离。
+      let r = await cached(`${baseKey}:esc-rep:${i}:${swap ? 'sw' : 'ns'}:${repModel ?? ''}`, () =>
+        gatedRequest<Record<string, unknown>>(deps, 'compare', mkRepParams(swap), signal))
       if (swap) r = { reward_a: r.reward_b, reward_b: r.reward_a }
       // F1: escalation reps pass the same clamp01/anomaly gate as k1 —
       // a compromised model cannot smuggle out-of-range rewards through the
@@ -569,6 +711,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       tag_a: tagA,
       tag_b: tagB,
       message: '多次评估胜者不一致，信号不稳定，建议人工复核',
+      // 审查 #4/F8（复盘 R-refcomp）：unstable 与 flat/composite 一样携带耗时。
+      duration_ms: Date.now() - started,
       ...(anyAnomaly ? { anomaly: 'reward_out_of_range', warning: anomalyWarning } : {}),
       // 审查 #6: literal-mc 采样在临界分差下尤其不稳——如实标注路径与建议。
       ...(mcUnstable.note ? { note: mcUnstable.note } : {}),
@@ -627,7 +771,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   p.pivots = boundParam(p.pivots, MAX_PIVOTS)
   p.max_workers = boundParam(p.max_workers, MAX_MAX_WORKERS)
   // 深度预设：同 runCompare。
-  p.criteria = expandCriteria(p.criteria)
+  p.criteria = expandCriteria(p.criteria, deps.criteriaDir)
   // 传输层加固：问题与每个候选过 sanitize。
   const safeProblem = sanitizeForVerifier(p.problem)
   const safeCandidates = p.candidates.map((c) => sanitizeForVerifier(c))
@@ -784,8 +928,11 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     // "independent re-evaluation" trivially correlated with k1.
     const escParams = mkParams(escK)
     delete escParams.seed
-    escalated = await gatedRequest<Record<string, unknown>>(deps, 'select',
-      { ...escParams, ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)
+    // F11（复盘 R-refcomp）：select 的整场升级锦标赛同样进缓存去重（并发同参
+    // 窗口内只烧一份）；失败时 cached() 自动逐出键，catch 分支语义不变。
+    escalated = await cached(`${baseKey}:esc-k${escK}:${escModel ?? ''}`, () =>
+      gatedRequest<Record<string, unknown>>(deps, 'select',
+        { ...escParams, ...(escModel ? { model: escModel } : {}), cache: escCachePath }, signal)) as Record<string, unknown>
   } catch (error) {
     // U-B3: degraded-to-k1 is still a real scored call — log it.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
@@ -816,6 +963,8 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       k_used: escK,
       tags: candTags,
       message: '两次评估第一名不一致，信号不稳定，建议人工复核',
+      // 审查 #4/F8（复盘 R-refcomp）：unstable 与 flat/composite 一样携带耗时。
+      duration_ms: Date.now() - started,
       ...(k1.anomaly !== undefined ? { anomaly: k1.anomaly, warning: k1.warning } : {}),
       ...(escalated.anomaly !== undefined ? { anomaly: escalated.anomaly, warning: escalated.warning } : {}),
       // 审查 #6: literal-mc 采样在临界分差下尤其不稳——如实标注路径与建议。
@@ -938,6 +1087,14 @@ export function createEscalationRunner(deps: EscalationDeps) {
       fallThroughParams.steps = (fallThroughParams.steps as unknown[])
         .map((s) => (typeof s === 'string' ? sanitizeForVerifier(s) : s))
     }
+    // U-N4: track 经 task_start / 服务缝到达时，checkpoint_steps 也要过与同步
+    // 工具相同的校验（官方包对空/乱序/非整数行为未定义）。
+    if (method === 'track' && fallThroughParams.checkpoint_steps !== undefined) {
+      const cs = fallThroughParams.checkpoint_steps as unknown
+      const valid = Array.isArray(cs) && cs.length > 0
+        && cs.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 1)
+      if (!valid) throw new Error('verifier track `checkpoint_steps` must be a non-empty array of positive integers (1-based step indices)')
+    }
     // #11: track via task_start / service seam must respect the budget too
     // (runSelect/runCompare guard themselves; the fall-through does not).
     if (method === 'track') await costGuard(deps, 'track')
@@ -1029,7 +1186,12 @@ export function createVerifierTaskManager(
         try {
           // Async tasks get their own (much larger) budget: the sync 300s
           // bridgeTimeoutMs must not kill a long tournament scoring.
-          const result = runner && (method === 'select' || method === 'compare')
+          // F1（复盘 R-refcomp）：track 必须与 select/compare 一样走 runner——
+          // 旧代码只分流 select/compare，task_start(track) 直达裸桥请求，绕过
+          // sanitize/boundParam/costGuard/scoringGate/clamp01 全部运输层加固。
+          // runner 的 fall-through 分支对 track 应用同一套加固（含 U-N4 的
+          // checkpoint_steps 校验），服务缝与本路径共用同一收口。
+          const result = runner
             ? await runner(method, params)
             : await (await getBridge()).request<unknown>(method, params, timeoutMs ?? defaultTimeoutMs)
           const done: VerifierTaskRecord = { ...record, status: 'done', ts: now(), result }
@@ -1102,10 +1264,14 @@ export interface ToolsOptions {
   maxCostPerVerification?: number
   costPer1kInputTokens?: number
   costPer1kOutputTokens?: number
+  /** G5: 显式后端地址（只读回显用；未配置 = 凭据自动探测）。 */
+  backendBaseUrl?: string
+  /** G3: criteria .md 模板目录（热加载；缺省只用内置 deep_review/root_cause）。 */
+  criteriaDir?: string
 }
 
 interface VerifierToolArgs {
-  action: 'select' | 'compare' | 'track' | 'decompose' | 'evaluate_session' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage'
+  action: 'select' | 'compare' | 'track' | 'decompose' | 'evaluate_session' | 'progress_start' | 'progress_update' | 'progress_close' | 'task_start' | 'task_status' | 'usage' | 'config'
   problem?: string
   candidates?: string[]
   candidate_a?: string
@@ -1157,9 +1323,11 @@ function renderResult(value: Record<string, unknown>): { type: 'text'; text: str
   if (value.signal === 'flat') {
     const secs = typeof value.duration_ms === 'number' ? ` ⏱ ${(value.duration_ms / 1000).toFixed(1)}s` : ''
     if (value.reward_a !== undefined) {
-      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}${value.tag_a ? ` [${String(value.tag_a)}]` : ''}\nreward_b=${value.reward_b}${value.tag_b ? ` [${String(value.tag_b)}]` : ''}${secs}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+      // F7（复盘 R-refcomp）：warning 可能已自带 ⚠️（clamp/anomaly 路径）——
+      // 走幂等助手，flat 分支不再渲染双 ⚠️。
+      return { type: 'text', text: `${prefix}reward_a=${value.reward_a}${value.tag_a ? ` [${String(value.tag_a)}]` : ''}\nreward_b=${value.reward_b}${value.tag_b ? ` [${String(value.tag_b)}]` : ''}${secs}${value.warning ? `\n${warnText(value.warning)}` : ''}` }
     }
-    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${renderTaggedScores(value.scores, value.tags)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n⚠️ ${value.warning}` : ''}` }
+    return { type: 'text', text: `${prefix}Best candidate index: ${value.index}${secs}\nScores: ${renderTaggedScores(value.scores, value.tags)}\nRanking: ${JSON.stringify(value.ranking)}${value.warning ? `\n${warnText(value.warning)}` : ''}` }
   }
   if (value.index !== undefined || value.ranking !== undefined) {
     // 审查 #4: 展示真实耗时；大候选数时提示异步路径（select 中位 ~37.8s）。
@@ -1223,17 +1391,18 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
     maxCostPerVerification: options.maxCostPerVerification,
     costPer1kInputTokens: options.costPer1kInputTokens,
     costPer1kOutputTokens: options.costPer1kOutputTokens,
+    criteriaDir: options.criteriaDir,
   }
 
   ctx.effect(() => {
     const dispose = ctx.tools.register(defineTool({
       name: 'verifier',
       description:
-        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory; returns checkpoint scores — count may be fewer than steps, official prefix-scoring semantics), decompose (deep-review a trajectory: step summaries + failure classification + check questions for manual verification), evaluate_session (track + structured export: checkpoint table, trend, JSONL-ready string), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads — select can take ~40s, compare ~11s, so async avoids blocking), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; decompose/evaluate_session: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
+        'LLM-as-a-Verifier: fine-grained verification with logprob-based rewards in [0,1]. Actions: select (best of N candidates; returns index/ranking/scores), compare (pairwise rewards; quality gate), track (score a finished trajectory; returns checkpoint scores — count may be fewer than steps, official prefix-scoring semantics), decompose (deep-review a trajectory: step summaries + failure classification + check questions for manual verification), evaluate_session (track + structured export: checkpoint table, trend, JSONL-ready string), progress_start/update/close (live progress sensor; a score persistently below ~0.05 after real work means: stop and change strategy), task_start (run select/compare/track async with a 30min budget; use for 3+ candidates or large payloads — select can take ~40s, compare ~11s, so async avoids blocking), task_status (poll; pass wait_seconds=120 instead of blind-polling; returns running/done/error/unknown/cancelled), config (read-only echo of the effective scoring config — model/backend/timeouts/budget — and where to change it). Required args — select: problem, candidates, criteria; compare: problem, candidate_a, candidate_b, criteria; track: problem, steps; decompose/evaluate_session: problem, steps; progress_start: problem; progress_update: tracker_id, step; task_start: method, params (JSON string); task_status: task_id. Keep n_evaluations=1, pivots=2 unless accuracy matters more than cost; close margins are auto-re-evaluated and averaged.',
       parameters: {
         action: {
           type: 'string',
-          enum: ['select', 'compare', 'track', 'decompose', 'evaluate_session', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage'],
+          enum: ['select', 'compare', 'track', 'decompose', 'evaluate_session', 'progress_start', 'progress_update', 'progress_close', 'task_start', 'task_status', 'usage', 'config'],
           required: true,
           description: 'What to do.',
         },
@@ -1425,9 +1594,15 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             }
             // 结构化导出：每步分数表 + 趋势 + JSONL 就绪串（lanbaolu 导出格式）。
             const scores = Array.isArray(raw.scores) ? raw.scores as number[] : []
+            // F9（复盘 R-refcomp）：桥侧已透传官方 ProgressResult.steps（真实
+            // checkpoint 步号，默认内点 2..T-1）——导出表用它对位；旧桥无此字段
+            // 时退回 i+1（并如实标注）。
+            const ckSteps = Array.isArray((raw as Record<string, unknown>).checkpoint_steps)
+              ? (raw as Record<string, unknown>).checkpoint_steps as number[]
+              : null
             // 结构化导出：checkpoint 分数表（诚实标注——官方 track 对 N 步轨迹
             // 返回的是前缀评分的 checkpoint 分数，数量 ≤ 步骤数，不逐一对位）。
-            const table = scores.map((s, i) => ({ checkpoint: i + 1, score: s }))
+            const table = scores.map((s, i) => ({ checkpoint: ckSteps?.[i] ?? i + 1, score: s }))
             const trend = scores.length >= 2 ? Number((scores[scores.length - 1] - scores[0]).toFixed(4)) : 0
             const exportable = {
               problem: esProblem,
@@ -1435,7 +1610,9 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               scored_at: new Date().toISOString(),
               // 官方 track 语义：checkpoint 分数（前缀轨迹评分），非每步对位
               checkpoints: table,
-              note: 'track 返回前缀评分的 checkpoint 分数，数量 ≤ 输入步骤数',
+              note: ckSteps
+                ? 'track 返回前缀评分的 checkpoint 分数，checkpoint 列为官方真实步号，数量 ≤ 输入步骤数'
+                : 'track 返回前缀评分的 checkpoint 分数，数量 ≤ 输入步骤数（当前桥未透传官方步号，checkpoint 列为序号非步号）',
               trend,
               summary: scores.length ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)) : 0,
             }
@@ -1539,6 +1716,28 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
           case 'usage': {
             const result = await bridge.request<Record<string, unknown>>('usage', {}, undefined, signal)
             return asToolResult(result)
+          }
+          case 'config': {
+            // G5（复盘 R-refcomp）：轻量只读回显——生效中的关键配置与修改位置，
+            // 把「切后端四步手工流程」压成「看一眼 → 改两行」。不做设置页：
+            // 配置单源化到 cordis.patch.yml 是刻意取舍（双源漂移风险）。
+            return asToolResult({
+              config: {
+                verifier_model: defaultModel ?? '(backend default)',
+                backend_base_url: options.backendBaseUrl ?? '(credential auto-detect)',
+                bridge_timeout_ms_sync: syncBudgetMs ?? 300_000,
+                task_timeout_ms_async: taskTimeoutMs ?? 1_800_000,
+                max_workers_bridge: options.maxConcurrentScoring ?? 4,
+                auto_escalate: escalation?.autoEscalate ?? true,
+                escalate_threshold: escalation?.escalateThreshold ?? 0.15,
+                max_escalate_k: escalation?.maxEscalateK ?? 3,
+                escalation_model: escalation?.escalationModel ?? '(same as verifierModel)',
+                max_cost_per_verification_usd: options.maxCostPerVerification ?? 0,
+                cost_per_1k_input_tokens_usd: options.costPer1kInputTokens ?? 0,
+                cost_per_1k_output_tokens_usd: options.costPer1kOutputTokens ?? 0,
+              },
+              hint: 'read-only echo / 只读回显。修改位置：~/.dsh/profiles/<profile>/cordis.patch.yml 的 verifier-brain 条目（推荐，实际生效层）或插件自带 cordis.patch.yml；改完重启 dsh 生效。凭据→后端映射见 README「评分后端配置」节。',
+            })
           }
         }
       },

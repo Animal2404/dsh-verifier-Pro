@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # RELEASING.md 清单要求：支持手动触发（发布前在任意分支跑全量矩阵）。
+  workflow_dispatch:
 
 jobs:
   # 快 job：纯逻辑验证（无 llm-verifier / 无 harness 依赖），~1 分钟内完成

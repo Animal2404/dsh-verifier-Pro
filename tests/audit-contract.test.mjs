@@ -15,7 +15,7 @@ test('契约①: artifactName 的哈希宽度与 resolve 基准两侧一致（�
   for (const [name, src] of [['smoke.mjs', smokeSrc], ['build_evidence.mjs', buildEvidenceSrc]]) {
     assert.ok(src.includes('shortHash'), `${name} 必须定义 shortHash`)
     assert.match(src, /shortHash\(resolve\(/, `${name} 的哈希必须基于 resolve() 绝对路径`)
-    assert.ok(src.includes(".slice(0, 8)"), `${name} 哈希宽度必须 = 8（两侧不一致即身份分叉）`)
+    assert.ok(src.includes(".slice(0, 12)"), `${name} 哈希宽度必须 = 12（两侧不一致即身份分叉）`)
     assert.doesNotMatch(src, /process\.chdir/, `${name} 不得 chdir（破坏共享 CWD 身份契约）`)
   }
 })

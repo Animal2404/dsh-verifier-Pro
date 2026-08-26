@@ -2,7 +2,29 @@
 
 > 事实记录：每个版本实际完成了什么、验证状态如何。不做承诺（承诺看 PLAN.md）。
 
-## v0.7.0（当前 HEAD，2026-08-24 发布）
+## v0.7.4（2026-08-26 — bestofn-refcomp 终版合并报告修复批；v0.7.1-v0.7.3 累积变更随本版 tag 一并首发）
+
+### 已完成（R-refcomp 三透镜审计：defect-hunter / installer-advocate / gap-scout）
+
+| 批次 | 关键事项 | 验证 |
+|------|----------|------|
+| 实现缺陷 | F1 task_start(track) 收口 runner（sanitize/bound/costGuard/gate/clamp 全覆盖）· F2 literal-mc 部分丢标签逐请求告警 · F3 响应形态检测改进程级事件表（跨线程真正生效）· F4 max_workers 缺省钳制到桥内 worker 数（原 50/500 路 fan-out）· F5 tracker TTL 按最近访问 · F6 track 全 0.5 桥侧护栏 · F7 双⚠️ · F8 unstable 补 duration_ms · F9 evaluate_session 用官方真实步号 · F11 升级 reps 进缓存去重 · F12 compare exact-flat 归因改 extract_score 回退 · F13 JSONL 轮换去忙等（F10 存疑不修） | 离线测试 + py 编译 |
+| 能力缺口 | G1 判别力自检 scripts/discriminative_check.py + setup --bench 接入 · G2 真实 token 计量回填 costGuard（usage 差值 EMA，时长粗估兜底）· G3 criteria/ .md 模板库热加载（TEMPLATE+两预设目录版）· G5 verifier config 只读回显 action | node --check / py_compile |
+| 安装体验 | F-1 --fix 六步闭环（venv→pip→复核→双写配置→构建→挂载 profile）· F-2 三层 cordis.patch.yml 关系文档化+双写 · M-1 启动无凭据响亮告警 · M-5 npm run build 改纯 Node 入口 build.mjs（Windows 免 bash）· m-1/m-2/m-4/m-9/m-10（--strict/--bench、上界钉扎、改名残留、Python 口径对齐） | node --check |
+| 实弹验证 | **G1 判别力基准 4/4 通过**（默认模型 flash-vision-exp @ opencode：粗判别 margin +1.000 / 细判别 +0.106 / 中文 +0.991 / 跑题拒绝 +1.000；脚本首跑全 0.5 踩中「未打标 client → prefill 回退」坑后与桥打标对齐修正）· **G4 多模态 images 首次真实验证**：红蓝方块的带图 select 正确选中红色（index=0，scores 0.654/0.346，LLM_VERIFIER_ALLOW_IMAGES=1）· 附带发现并修复：README 的 probe_logprobs.py 参数顺序与脚本实际签名（base_url api_key model）相反 | 实测 |
+| 文档 | README ZH/EN 大修：升级与卸载节、凭据→后端映射表（M-6）、EN 补齐缺失章节与 action 数、端到端示例去硬编码路径、钉扎示例动态措辞、30 秒冒烟+刷新提示 · cordis.patch.yml literal-mc 注释矛盾修正 · ci.yml 加 workflow_dispatch · 本文件版本漂移追平 | grep 核验 |
+
+## v0.7.3（2026-08-26 完成；当时未打 tag，随 v0.7.4 首发发布）
+
+外部评审 4 个确认 bug + 逻辑问题修复（costGuard 单次语义、expandCriteria 收口数值拒绝、
+probe 路由矛盾+TTL 缓存、bestofn 输出目录清理正则、history 缓存污染过滤等），测试 94/94。
+详见 CHANGELOG。
+
+## v0.7.1 → v0.7.2（2026-08-25 完成；当时未打 tag，随 v0.7.4 首发发布）
+
+v0.7.2 为 R3 vselftest 双成员审计 43 项发现修复（详见 CHANGELOG）；v0.7.1 为小批次文档/协议修订。
+
+## v0.7.0（2026-08-24 发布）
 
 ### 已完成（第二轮深度审计修复 + 协议升级 + /vselftest 首轮实战闭环）
 

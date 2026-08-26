@@ -3,7 +3,7 @@
  * dsh-verifier-Pro 验收回归 (TypeScript 层)
  * 直接调用 lib/tools.js 的 createEscalationRunner —— 覆盖
  * 自适应升级 / 缓存 / flat 检测 / 槽位交替 / 方向一致性判定。
- * 对应 ITERATION_PLAN.md §3 十个验收用例。
+ * 对应 ITERATION_PLAN.md §3 十个验收用例（原文档已归档至 docs/HISTORY.md）。
  */
 import { PythonBridge } from '../lib/bridge.js';
 import { VerifierStore } from '../lib/persist.js';

@@ -125,6 +125,17 @@ export function apply(ctx: Context, config: Config): void {
     ...(config.backendBaseUrl ? { OPENAI_BASE_URL: config.backendBaseUrl } : {}),
     ...(config.backendApiKey ? { OPENAI_API_KEY: config.backendApiKey } : {}),
   })
+  // M-1（复盘 R-refcomp）：随包默认的评分后端是作者私有凭据环境——开箱第一次
+  // 评分大概率 401。启动即检测桥 env 里是否解析到了任何可用 API key，缺则打
+  // 响亮告警并指向 setup.mjs（把问题暴露在装配期而非使用期；不拒绝加载）。
+  if (!env.OPENAI_API_KEY) {
+    ctx.logger.warn(
+      'verifier-brain: 未解析到任何评分凭据（OPENAI_API_KEY 为空）——随包默认后端(%s)是作者的环境，'
+      + '首次评分调用大概率 401。修复：在 ~/.dsh/.credentials.yaml 写入 DEEPSEEK_API_KEY / '
+      + 'OPENCODE_GO_API_KEY / OPENROUTER_API_KEY 任一，然后运行 node scripts/setup.mjs --check 按提示配置。',
+      config.backendBaseUrl ?? '(credential auto-detect)',
+    )
+  }
   let probeResult: ProbeResult | null = null
   let probePromise: Promise<void> | null = null
 
@@ -209,6 +220,9 @@ export function apply(ctx: Context, config: Config): void {
     maxCostPerVerification: config.maxCostPerVerification,
     costPer1kInputTokens: config.costPer1kInputTokens,
     costPer1kOutputTokens: config.costPer1kOutputTokens,
+    // G5：config 回显动作需要后端地址；G3：criteria/ 模板目录（热加载）。
+    backendBaseUrl: config.backendBaseUrl,
+    criteriaDir: join(pluginRoot, 'criteria'),
   })
 
   // M4-B: /bestofn command (lazily when the commands registry is mounted)

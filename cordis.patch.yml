@@ -19,8 +19,10 @@
         # Default verifier model; per-call `model` args override.
         # 2026-08-23: 默认改为 deepseek-v4-flash-vision-exp（实测可评分、成本低）。
         # 备选可用：qwen3.7-plus / qwen3.6-plus（top_logprobs 已按模型裁剪）。
-        # 禁用：deepseek-v4-flash（DFLASH 不支持 logprobs 400）、muse-spark/
-        # minimax*/mimo*/hy3（上游不返回 token 级 logprobs）。
+        # literal-mc 路径（无 logprobs 时的采样降级，桥自动路由）：minimax-m3 /
+        # minimax-m2.7 / mimo-v2.5-pro / muse-spark-1.2-contributor /
+        # deepseek-v4-flash（DFLASH 禁 logprobs，但 literal-mc 可用——不再是「勿用」）；
+        # 连续 3 次无评分标签会 fail-closed 拒评（档案自愈），详见 README「模型评分路径」。
         verifierModel: deepseek-v4-flash-vision-exp
         # Explicit backend for opencode.ai (uses OPENCODE_GO_API_KEY from credentials)
         backendBaseUrl: https://opencode.ai/zen/go/v1

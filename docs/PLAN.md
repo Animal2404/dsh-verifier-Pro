@@ -16,7 +16,7 @@ ADR-001 决策维持 Python 桥，因此**不做全量算法移植**。TS 层护
 - [ ] 越界分数异常计数器：同一会话内 anomaly 连续 ≥3 次自动降级提示（建议换模型）
 - [ ] 官方包私有符号依赖（`_llm_verifier_deepseek` tag）加 try/降级路径 —— 桥断时回退官方默认行为而非崩溃（注：bridge_fix.install 已有 try/except，tag 有 VERIFIER_BRAIN_NO_TAG 开关，全量降级路径未做）
 
-**重启 ADR-001 辩论的触发条件**（照抄 THIRD_PARTY_ANALYSIS_REVIEW.md §2.2）：
+**重启 ADR-001 辩论的触发条件**（照抄自 THIRD_PARTY_ANALYSIS_REVIEW §2.2，原文档已归档至 docs/HISTORY.md）：
 连续 2 次因上游私有符号/供应商行为变更导致桥断裂，且上游 30 天无修复。
 
 ### 发布门禁（已达成）

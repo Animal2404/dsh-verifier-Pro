@@ -18,7 +18,7 @@ A [LLM-as-a-Verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) br
 
 ```
 DSH Agent
-  ↓ verifier tool (one tool × 8 actions: select/compare/track/progress_*/task_*/…)
+  ↓ verifier tool (one tool × 12 actions: select/compare/track/decompose/evaluate_session/progress_*/task_*/usage/config)
 dsh-verifier-Pro (Node/TS host plugin)
   ↓ JSON Lines over stdio (id-correlated, concurrent)
 bridge/verifier_brain_bridge.py (ThreadPool × N)
@@ -27,63 +27,83 @@ llm-verifier 0.2.0 (official PyPI package)
   ↓ logprobs backend (OpenAI-compatible / DeepSeek / Vertex / Gemini)
 ```
 
-## Three core scenarios
-
-| Scenario | Usage | Notes |
-|---|---|---|
-| Test-time scaling | `verifier` action=`select` | N candidates → PPT tournament O(Nk) selection |
-| Progress tracking | `verifier` action=`progress_*` | Live per-step scoring; sustained <0.05 = likely wrong direction |
-| Quality gate / RL | `verifier` action=`compare` / `track` | Pairwise review, trajectory replay, reward data export |
-
-One tool, eight actions: `select` / `compare` / `track` / `progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status`. Just tell your agent "run a verifier compare".
+One tool, twelve actions: `select` / `compare` / `track` / `decompose` / `evaluate_session` /
+`progress_start` / `progress_update` / `progress_close` / `task_start` / `task_status` /
+`usage` / `config`. Just tell your agent "run a verifier compare".
 
 ## Install
 
-Requires Node 18+, Python 3.10+, and backend credentials whose model returns logprobs.
+Requires Node 18+ (`engines: >=18`), Python 3.10+, and a scoring-backend credential whose
+model returns logprobs.
 
 ### One-click (recommended)
 
 ```sh
 git clone https://github.com/Animal2404/dsh-verifier-Pro.git
 cd dsh-verifier-Pro
-node scripts/setup.mjs --check    # diagnose: what's missing + recommended scoring-backend config for YOUR credentials
-node scripts/setup.mjs --fix      # auto-repair: create .venv + install llm-verifier
+node scripts/setup.mjs --check    # diagnose: what's missing + recommended backend config for YOUR credentials
+node scripts/setup.mjs --fix      # fully automatic: .venv → llm-verifier → dual-write config →
+                                  #         build lib/ → mount into profile (default: web)
 ```
 
-`--check` reads `~/.dsh/.credentials.yaml`, picks a scoring-backend config matching credentials
-you already hold, and points out exactly where the author's hardcoded defaults differ from your
-environment — fixing the two config lines is all it takes.
+`--fix` runs all six steps: ① create `.venv` → ② pip install llm-verifier → ③ re-verify →
+④ dual-write the credential-matched `verifierModel` / `backendBaseUrl` into BOTH the repo patch
+and the profile patch (the layer that actually takes effect — see "Configuration details") →
+⑤ `npm run build` → ⑥ auto-mount via `dsh plugin --profile web add <dir>` when the dsh CLI is on
+PATH. Then **restart dsh**; if the web UI was already open, **reload the browser tab once** to
+pick up the panel bundle.
+
+| Flag | Purpose |
+|---|---|
+| `--profile <name>` | Mount target profile (default `web`) |
+| `--no-mount` | Stop after build; skip auto-mount |
+| `--check --strict` | exit 1 when items are missing (CI-friendly; plain `--check` always exits 0) |
+| `--bench` | Discriminative self-check — quality regression gate after changing the scoring model |
+
+### Manual install (what --fix automates)
+
+```sh
+# 1) Python side: official llm-verifier into the project venv
+python -m venv .venv
+.venv/Scripts/python -m pip install llm-verifier     # Windows
+# .venv/bin/python -m pip install llm-verifier        # macOS/Linux
+
+# 2) Build (pure Node entry — no bash required on Windows; build.sh kept for bash users)
+npm run build
+
+# 3) Mount into your profile (restart dsh to take effect)
+dsh plugin --profile web add <this package directory>
+```
+
+> **Dev assembly note**: this repo's dev install relies on the DSH host injector's junction
+> mechanism — peer packages under `node_modules` are links into the host's global install.
+> **`npm ci`/`npm install` is NOT a supported assembly method** (`package-lock.json` is not
+> committed). Local development mounts via `dev_install_package` / the supermod injector.
 
 ### Scoring backend configuration (important!)
 
-The default `verifierModel` / `backendBaseUrl` in `cordis.patch.yml` reflect the **author's
-environment** — adjust these two lines to match your own credentials:
+The default `verifierModel` / `backendBaseUrl` bundled in `cordis.patch.yml` reflect the
+**author's environment** — adjust these two lines to match your own credentials:
 
 | Credentials you hold | verifierModel | backendBaseUrl | Tested |
 |---|---|---|---|
-| `DEEPSEEK_API_KEY` (DeepSeek official) | `deepseek-chat` | `https://api.deepseek.com` | ✅ recommended |
+| `DEEPSEEK_API_KEY` (DeepSeek official) | `deepseek-chat` | `https://api.deepseek.com` | ✅ recommended (logprob distribution not verified in-repo — run probe first) |
 | `OPENCODE_GO_API_KEY` (opencode) | `deepseek-v4-flash-vision-exp` | `https://opencode.ai/zen/go/v1` | ✅ verified (default) |
 | `OPENROUTER_API_KEY` | `deepseek/deepseek-chat` | `https://openrouter.ai/api/v1` | unverified |
 
 > ✅ **Default: `deepseek-v4-flash-vision-exp`** (logprobs path, cheap, verified).
-> Also verified on the opencode endpoint: `qwen3.7-plus`, `qwen3.6-plus` (logprobs path),
-> and via the literal-mc sampling path: `minimax-m3`, `minimax-m2.7`, `mimo-v2.5-pro`,
-> `muse-spark-1.2-contributor`, `deepseek-v4-flash` (no logprobs needed — bridge routes them
-> through literal score-tag sampling).
-> `deepseek-v4-pro` remains available but is **lowest priority** (expensive; use only when
-> the cheaper verified models are unavailable or for escalation-tier scoring).
-> ⚠️ `deepseek-v4-flash` (without vision-exp) rejects logprobs requests (DFLASH 400) — it
-> works only via the literal-mc path above.
->
-> Profile self-healing (fail-closed): a literal-mc model that emits no score tags for
-> 3 consecutive replies is marked DEGRADED — scoring is refused instead of silently
-> mis-scored; a passing probe recheck restores it automatically.
+> Also verified on opencode: `qwen3.7-plus`, `qwen3.6-plus` (logprobs path); via the literal-mc
+> sampling path: `minimax-m3`, `minimax-m2.7`, `mimo-v2.5-pro`, `muse-spark-1.2-contributor`,
+> `deepseek-v4-flash` (bridge routes them automatically).
+> Profile self-healing (fail-closed): a literal-mc model emitting no score tags for 3 consecutive
+> replies is marked DEGRADED — scoring refused instead of silently mis-scored; a passing probe
+> recheck restores it.
 
 Your chosen model must return **logprobs** — that's the foundation of fine-grained rewards.
 Verify with (Windows; macOS/Linux use `.venv/bin/python`):
 
 ```sh
-.venv/Scripts/python scripts/probe_logprobs.py <model> <base_url> <api_key>
+.venv/Scripts/python scripts/probe_logprobs.py <base_url> <api_key> <model>
 .venv/Scripts/python scripts/scan_logprob_models.py <your-key>
 ```
 
@@ -92,56 +112,37 @@ Verify with (Windows; macOS/Linux use `.venv/bin/python`):
 Talk to your agent; the injected system-prompt policy drives invocation:
 
 > Here are three candidate implementations — use the verifier to pick the best, then merge their strengths
-> (agent → verifier select ranking → integrator merge → verifier compare gate)
-
-> Run a team Best-of-N with AgentTeams: three members each write one, verifier selects, merge
-> (captain fan-out → verifier select → integrator pass → final compare gate)
 
 > This task has been running long — tell me how close we are
-> (agent → verifier progress_start/update; sustained low scores suggest a strategy change)
+
+Smoke test (30 seconds): after install + restart, say *"use the verifier to compare X and Y"* —
+a verifier compare card with scores/badges means it works.
 
 ### Best-of-N = merge, not just rank
 
 1. **Rank**: verifier select (large pools) or compare (2-3 candidates — cheaper, more discriminating);
-2. **Merge**: hand ALL survivors + scores to an integrator agent; taking only the champion is "ranking", not Best-of-N;
-3. **Gate**: verifier compare(merged, champion) — adopt merged only if it scores no lower than the champion.
-
-The verifier stays a pure reward function; writing is done by agents — a deliberate boundary.
+2. **Merge**: hand ALL survivors + scores to an integrator agent;
+3. **Gate**: verifier compare(merged, champion) — adopt merged only if it scores no lower.
 
 ### /bestofn one-click command (dual-track since v0.7.0)
 
 ```
-/bestofn <goal> [N]                        # BUILD track: spawn N lens-diverse members → plan gate → evidence chain → select → revision loop → merge → gate
-/bestofn --local <c1> <c2> ... [--summary name=text]   # local mode: evidence chain on existing artifacts → select → report
-/bestofn <audit goal description>          # AUDIT track: auto-selected when the deliverable is a report
+/bestofn <goal> [N]                        # BUILD track: N lens-diverse members → plan gate → evidence chain → select → revision loop → merge → gate
+/bestofn --local <c1> <c2> ... [--summary name=text]   # local mode on existing artifacts
+/bestofn <audit goal description>          # AUDIT track: auto-selected for report deliverables
 ```
 
-Smart input detection: plain text = goal; existing file paths = local scoring mode.
-
-- **BUILD track**: N lens-diverse members (boldest / most defensive / performance-and-edge-cases — same complete scope, different angle) → **plan gate** (compare plans first, merge losers' strengths) → evidence chain per artifact (crash = out, unknown = out) → `select("deep_review")` → **revision loop** (findings go back verbatim, fixed with evidence, re-scored; cap 2 rounds) → integrate all survivors → compare gate.
-- **AUDIT track** (report/analysis deliverables): scope freeze + anti-contamination → parallel audits where EVERY claim cites file:line + quoted snippet → captain mechanically verifies ≥30% of citations plus ALL fatal findings (fabrication invalidates the finding and halves member weight) → mandatory cross-review → `select("root_cause")` → final report labels every finding **VERIFIED / REPORTED**.
-- **Stable candidate tags**: select results carry `tags`, compare carries `tag_a/tag_b` (first 8 hex of the candidate text). Positional letters shift between chained evaluations; tags never do.
-- Budget gate: state N and maxCostPerVerification before spawning.
+BUILD/AUDIT track details, stable candidate tags (sha256[:8]) and budget gates: see the
+Chinese README section «/bestofn 一键命令» — the protocol is identical.
 
 ### /vselftest one-click self-test (v0.7.0+)
 
-Zero-argument AUDIT-track team audit of the plugin's own bestofn↔smoke boundary (N=2 lens-diverse members, citation verification fully on):
+Zero-argument AUDIT-track team audit of the plugin itself:
 
 ```
-/vselftest                # default focus: artifactName hash ↔ smokeOk lookup + parseArgs edges
+/vselftest                # default focus
 /vselftest <focus note>   # custom focus
 ```
-
-This is the "test ourselves with our own doctrine" entry point — its first run caught 4 bugs that three manual audit rounds had missed.
-
-### Depth criteria presets (v0.7.0+)
-
-Generic Correctness/Completeness/Clarity rubrics reward breadth and punish insight — LLM judges favor candidates that list many shallow observations over one that nails the root cause. For "which candidate is BETTER" questions use the built-in presets (expanded automatically on every scoring path):
-
-- `deep_review` — root cause pinned with evidence · failure modes & boundaries · tradeoffs · actionability
-- `root_cause` — root cause · evidence · impact
-
-Unknown names (e.g. official `terminal_bench`) pass through unchanged.
 
 ## Configuration
 
@@ -153,15 +154,12 @@ Unknown names (e.g. official `terminal_bench`) pass through unchanged.
         bridgeTimeoutMs: 300000
         taskTimeoutMs: 1800000
         verifierModel: deepseek-v4-flash-vision-exp
-        backendBaseUrl: https://opencode.ai/zen/go/v1
+        backendBaseUrl: https://opencode.ai/zen/go/v1   # change to match YOUR credentials
         maxWorkers: 4
         promptSection: true
         autoEscalate: true
         escalateThreshold: 0.15
         maxEscalateK: 3
-        # optional tiered scoring: stronger model for escalation reps only —
-        # v4-pro is the expensive last-resort tier; leave unset to reuse verifierModel
-        # escalationModel: deepseek-v4-pro
 ```
 
 | Key | Default | Notes |
@@ -169,29 +167,110 @@ Unknown names (e.g. official `terminal_bench`) pass through unchanged.
 | `pythonBin` | auto-detect `.venv` | Python executable |
 | `bridgeTimeoutMs` | `300000` | SYNC tool-call bridge timeout |
 | `taskTimeoutMs` | `1800000` | ASYNC task budget (long tournaments) |
-| `verifierModel` | — | Default scoring model (must return logprobs) |
+| `verifierModel` | — | Default scoring model |
 | `backendBaseUrl` / `backendApiKey` | credential auto-detect | Explicit OpenAI-compatible backend |
-| `maxWorkers` | `4` | Concurrent workers in the Python bridge |
-| `stateDir` | `~/.dsh/verifier-brain` | Persistence dir (history/tasks/score-cache JSONL) |
+| `maxWorkers` | `4` | Bridge request concurrency AND the default inner fan-out `max_workers` (since v0.7.4); explicit args cap at 16 |
+| `stateDir` | `~/.dsh/verifier-brain` | Persistence dir (history/tasks JSONL — contains submitted candidate text) |
 | `promptSection` | `true` | Inject usage policy into system prompt |
 | `autoEscalate` / `escalateThreshold` / `maxEscalateK` | true / 0.15 / 3 | Adaptive verification scaling |
 | `escalationModel` | unset | Tiered scoring: stronger model for escalation reps only |
+| `maxCostPerVerification` | `0` (unlimited) | Per-verification USD budget — enforced on every scoring path |
+| `costPer1kInputTokens` / `costPer1kOutputTokens` | `0` | Rates feeding the budget guard (real token usage preferred, duration heuristic as fallback) |
+
+### Configuration details (which file actually wins?)
+
+There can be THREE `cordis.patch.yml` files — know which one you are editing:
+
+1. **Profile patch** `~/.dsh/profiles/<profile>/cordis.patch.yml` — THE effective layer;
+   overrides everything below. Edit the `verifier-brain` entry here. Restart dsh to apply.
+2. The copy shipped inside the installed package (bundle patch).
+3. The copy in your clone (what `setup.mjs --fix` writes).
+
+`--fix` writes both ① and ③ when they exist. Ask the agent for `verifier config` to echo the
+effective settings read-only.
+
+**Credential → backend resolution**: plugin-config `backendBaseUrl`/`backendApiKey` always win;
+otherwise known keys are read from `~/.dsh/.credentials.yaml` (flat `KEY: value`, nested `refs:`,
+or `provider:` + `api_key:` sections) then plain env vars. Binding: opencode baseUrl ↔
+`OPENCODE_GO_API_KEY`; api.deepseek.com ↔ `DEEPSEEK_API_KEY`; openrouter ↔ `OPENROUTER_API_KEY`;
+anything else needs an explicit `backendApiKey`.
+
+## Version pinning & upgrade
+
+Avoid floating on `main` — pin:
+
+```sh
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro#a1b2c3d     # commit
+dsh plugin --profile web add github:Animal2404/dsh-verifier-Pro@<latest published tag>   # tag — see Releases page
+```
+
+**To upgrade**: re-run the add command pointing at the newest published tag (clone installs:
+`git pull && node scripts/setup.mjs --fix`), then restart dsh. Release notes:
+[Releases](https://github.com/Animal2404/dsh-verifier-Pro/releases).
+
+## Uninstall & leftovers
+
+| Leftover | Location | Cleanup |
+|---|---|---|
+| Patch entry | `- id: verifier-brain` block in the profile's `cordis.patch.yml` | delete the block |
+| Installed copy | plugin dir inside the profile package dir | remove dir |
+| **Score history (contains submitted candidate text — sensitive)** | `~/.dsh/verifier-brain/history.jsonl`, `tasks.jsonl` | delete the whole `~/.dsh/verifier-brain/` dir |
+| Python venv | `.venv/` inside your clone | delete |
+| Patch backups | `cordis.patch.yml.bak.*` (last 3 kept) | delete manually |
+
+## Troubleshooting FAQ (by layer)
+
+### Layer 1: LLM backend (most common)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `DFLASH speculative decoding does not support return_logprob` (400) | using `deepseek-v4-flash` | use `deepseek-v4-flash-vision-exp` or qwen3.7/3.6-plus |
+| `Range of top_logprobs should be [0, 5]` (400) | qwen models cap top_logprobs at 5 | handled automatically by the bridge |
+| `Invalid API key` (401) | missing/wrong backend credential | check `~/.dsh/.credentials.yaml`; `setup.mjs --check` diagnoses |
+| `no answer logprobs` | model returns no token-level logprobs | literal-mc fallback engages automatically; otherwise switch models |
+| All scores exactly 0.5 (degraded) | batch scoring failure masked as ties | switch backend/model and retry |
+
+### Layer 2: Python bridge
+
+| Error | Cause | Fix |
+|---|---|---|
+| `llm-verifier is not installed` | venv missing the package | `.venv/Scripts/python -m pip install "llm-verifier>=0.2.0,<0.3.0"` |
+| `python bridge timed out` | cold start or slow model | retry; verify the model (layer 1) |
+| `Connection error` | bridge process crashed | auto-restarts; otherwise restart dsh |
+
+### Layer 3: DSH host / config
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Tool not registered | plugin not mounted | check the `cordis.patch.yml` insert entry; restart dsh |
+| Config changes ignored | config is read at load time | **restart dsh** |
+| `Cannot find module` | broken dependency links | re-run `npm run build` |
+
+## Naming
+
+Repo `Animal2404/dsh-verifier-Pro` ↔ package `@dsh-external/dsh-verifier-pro` ↔ internal name
+`dsh-verifier-brain` / `verifier_brain_bridge.py`: historical; they all refer to the same plugin.
+`package.json`'s name is authoritative.
+
+## Criteria presets & quality gate
+
+Depth presets `deep_review` / `root_cause` expand on every scoring path; hot-loadable
+`criteria/*.md` templates override them (see Chinese README or `criteria/TEMPLATE.md`).
+After switching scoring models run the discriminative gate: `node scripts/setup.mjs --bench`.
 
 ## Reference projects
 
-- [llm-as-a-verifier/llm-as-a-verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) — the official framework (logprob expected reward, PPT tournament), consumed via PyPI `llm-verifier`
-- [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams) — the multi-agent torso; integrated via system-prompt policy + service calls, no fork
-- [uson1x/dsh-plugin-llm-verifier](https://github.com/uson1x/dsh-plugin-llm-verifier) — product-shape reference (parallel N attempts); not its non-logprob route
-- [lanbaolu/dsh-llm-verifier](https://github.com/lanbaolu/dsh-llm-verifier) — same-route pioneer (stdio bridge); independently rewritten with concurrency/persistence/Windows fixes
+- [llm-as-a-verifier/llm-as-a-verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) — the official framework, consumed via PyPI `llm-verifier`
+- [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams) — the multi-agent torso
+- [uson1x/dsh-plugin-llm-verifier](https://github.com/uson1x/dsh-plugin-llm-verifier) — product-shape reference
+- [lanbaolu/dsh-llm-verifier](https://github.com/lanbaolu/dsh-llm-verifier) — same-route pioneer (stdio bridge)
 
 ## Differences vs reference implementations
 
 Bridge concurrency (async tasks no longer serialize), durable state (survives restarts),
-first-class Windows, bridge crash auto-restart, team integration protocol (best-of-N merge /
-reviewer gates / progress sensors in system prompt), adaptive verification scaling
-(noise-band margins auto re-evaluated at K=3 with honest metadata), evidence-chain automation
-(smoke + visual description + source labeling; crashed candidates eliminated), and the
-/bestofn one-command loop (goal → N members → evidence → select → merge → gate).
+first-class Windows (pure Node build), bridge crash auto-restart, team integration protocol,
+adaptive verification scaling, evidence-chain automation, hard cost guards fed by real token
+usage, and the /bestofn one-command loop.
 
 ## License
 
