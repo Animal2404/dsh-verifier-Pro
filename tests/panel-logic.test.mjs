@@ -193,3 +193,12 @@ test('ACTION_LABELS 覆盖全部 action（卡片中文标题）', () => {
   assert.equal(titleOf('task_status'), '🔍 异步任务 · 查询 · task_status')
   assert.equal(titleOf('usage'), '🔍 用量统计 · usage')
 })
+
+test('N6: task_status 冠军 idx≥26 用真实 Excel 列名（AA 起；R6 两次修复的护栏）', () => {
+  const p = deriveOf({ action: 'task_status', status: 'done', result: { index: 26, scores: [0.9, 0.8, 0.7] } })
+  assert.match(p.summaryLine ?? '', /冠军 AA/, `idx=26 → AA: ${p.summaryLine}`)
+  const p0 = deriveOf({ action: 'task_status', status: 'done', result: { index: 0, scores: [0.9] } })
+  assert.match(p0.summaryLine ?? '', /冠军 A/, 'idx=0 → A')
+  const p51 = deriveOf({ action: 'task_status', status: 'done', result: { index: 51, scores: [0.9] } })
+  assert.match(p51.summaryLine ?? '', /冠军 AZ/, 'idx=51 → AZ')
+})

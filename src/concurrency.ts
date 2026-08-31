@@ -79,8 +79,6 @@ export class Semaphore {
 
 interface LRUEntry<V> {
   value: V
-  /** Insertion tick for LRU ordering (refreshed on get). */
-  tick: number
   /** Absolute expiry (Date.now()-based); Infinity when ttlMs <= 0. */
   expiresAt: number
 }
@@ -96,7 +94,6 @@ interface LRUEntry<V> {
  */
 export class LRUCache<K, V> {
   private readonly map = new Map<K, LRUEntry<V>>()
-  private tick = 0
 
   constructor(
     private readonly maxEntries = 500,
@@ -117,9 +114,8 @@ export class LRUCache<K, V> {
       this.map.delete(key)
       return undefined
     }
-    // Refresh recency.
-    entry.tick = ++this.tick
-    // Re-insert to move to insertion-order tail (Map iteration order).
+    // Refresh recency: re-insert to move to insertion-order tail (Map
+    // iteration order — P3-1 审计：tick 字段只写不读是死代码，已删)。
     this.map.delete(key)
     this.map.set(key, entry)
     return entry.value
@@ -143,7 +139,7 @@ export class LRUCache<K, V> {
       if (oldestKey === undefined) break
       this.map.delete(oldestKey)
     }
-    this.map.set(key, { value, tick: ++this.tick, expiresAt: this.ttlMs > 0 ? Date.now() + this.ttlMs : Number.POSITIVE_INFINITY })
+    this.map.set(key, { value, expiresAt: this.ttlMs > 0 ? Date.now() + this.ttlMs : Number.POSITIVE_INFINITY })
   }
 
   has(key: K): boolean {

@@ -170,7 +170,7 @@ verifier 只做 reward 函数，不做写手；整合由代理完成——这是
 
 **AUDIT 轨**（报告/分析类交付物）：范围冻结 + 反污染（审本项目禁止读历史审计文档）→ 并行审计（每条发现必须引用 file:line + 原文片段）→ 队长机械核验 ≥30% 引用 + 全部致命发现（伪造即无效并减半成员权重）→ 强制交叉审阅 → `select("root_cause")` → 最终报告逐条标注 **VERIFIED / REPORTED**。
 
-**稳定候选标签**：select 结果带 `tags`、compare 带 `tag_a/tag_b`（候选文本 sha256 前 8 位）。连续多轮评选拼子集时，位置字母会换指代而标签不变——按标签即可把第二轮的 A/B 对回第一轮的身份。
+**稳定候选标签**：select 结果带 `tags`、compare 带 `tag_a/tag_b`（候选文本 sha256 前 12 位）。连续多轮评选拼子集时，位置字母会换指代而标签不变——按标签即可把第二轮的 A/B 对回第一轮的身份。
 
 其他协议升级：预算门禁（开跑前声明 N 与 maxCostPerVerification）、修订环闭环（验证不闭环 = 昂贵的橡皮图章）、深度纪律条款（浅而全必须输给深而准）。
 
@@ -480,6 +480,14 @@ python scripts/discriminative_check.py --model <你的模型> --base-url <你的
 > （粗判别 +1.000 · 细判别 +0.106 · 中文 +0.991 · 跑题拒绝 +1.000）。多模态 `images` 亦于同日
 > 首次真实验证：红蓝方块带图 select 正确择红（scores 0.654 / 0.346）。
 
+**多模态 `images` 参数的安全边界（B1，v0.7.5 起）**：`images` 是 agent 可控的本地文件路径，
+默认不启用（文本端点自动剥离）。启用 `LLM_VERIFIER_ALLOW_IMAGES=1` 时，路径必须满足：
+① 位于白名单根目录内——`LLM_VERIFIER_IMAGE_ROOTS`（`;`/`:` 分隔；缺省 = 进程 cwd + 系统
+临时目录 + `DSH_HOME` + `~/.dsh`，覆盖证据链/冒烟产物与 /bestofn 产物所在位置）；② 单文件
+≤ `LLM_VERIFIER_IMAGE_MAX_MB`（缺省 8MB）。TS 工具层与 Python 桥**双层校验**（前缀判定先
+解析符号链接——白名单根内的 symlink 无法指向根外文件），违规路径响亮报错，绝不静默放行。
+完整披露见 SECURITY.md「已知安全边界与设计取舍」。
+
 ## 参考项目
 
 本项目参考了以下项目与文档（同路线先驱与协作底座）：
@@ -519,6 +527,8 @@ python scripts/discriminative_check.py --model <你的模型> --base-url <你的
 - `scripts/describe_visual.mjs` — 五维视觉描述（色彩/氛围/细节密度/风格化/第一印象）
 - `scripts/build_evidence.mjs` — 证据拼接（"候选自述" vs "非候选自述"来源标注）
 - `scripts/test_bestofn.mjs` — /bestofn 命令双模式验证
+- `scripts/audit_checks.mjs` — Playbook 机械化自检（28 项静态断言；`--full` 追加 npm test；发布前必跑，RELEASING.md 第 2 步）
+- `scripts/mutation_check.mjs` — 回归测试保真度/变异验证（修复代码被变异后测试必须变红；假测试即发现；变异场景需仓库形态 tests/）
 
 ## License
 

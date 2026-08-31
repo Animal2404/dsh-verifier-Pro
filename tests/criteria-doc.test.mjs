@@ -33,9 +33,9 @@ test('expandCriteria: template name whitelist blocks path traversal', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crit-'))
   try {
     writeFileSync(join(dir, 'evil.md'), '## X\nbad\n')
-    // ../evil.md 形态的名字不允许读盘 → 走内置/透传而非文件
-    const out = expandCriteria('../evil', dir)
-    assert.equal(out, '../evil')
+    // N1（2026-08-29 第二轮）：路径形态字符串从「透传」改为「响亮拒绝」——
+    // 旧契约（透传给官方包）正是任意文件读取通道的入口；throw 是安全失败。
+    assert.throws(() => expandCriteria('../evil', dir), /not supported/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

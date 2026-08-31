@@ -186,7 +186,21 @@ export function derivePanelState(
         const scores = Array.isArray(r.scores) ? (r.scores as unknown[]).map((s) => Number(s).toFixed(3)).join(', ') : null
         const reward = typeof r.reward_a === 'number' ? `reward_a=${Number(r.reward_a).toFixed(3)} / reward_b=${Number(r.reward_b).toFixed(3)}` : null
         const sig = typeof r.signal === 'string' ? ` · ${r.signal}` : ''
-        summaryLine = `✅ 任务完成${idx !== null ? ` · 冠军 ${String.fromCharCode(65 + idx)}` : ''}${scores !== null ? ` · scores [${scores}]` : ''}${reward !== null ? ` · ${reward}` : ''}${sig}`
+        // P3-14（2026-08-28 审计）：idx ≥ 26 时 String.fromCharCode(65+idx) 输出
+        // 非字母符号——改用真实 Excel 列名（A..Z → AA, AB, ...）兜底
+        // （R6 二次修正：上一版 `C${idx-26}` 在 idx=26 时输出 C0，并非 Excel 风格）。
+        const colName = (n: number): string => {
+          let s = ''
+          n++
+          while (n > 0) {
+            const m = (n - 1) % 26
+            s = String.fromCharCode(65 + m) + s
+            n = Math.floor((n - 1) / 26)
+          }
+          return s
+        }
+        const champion = idx === null ? null : colName(idx)
+        summaryLine = `✅ 任务完成${champion !== null ? ` · 冠军 ${champion}` : ''}${scores !== null ? ` · scores [${scores}]` : ''}${reward !== null ? ` · ${reward}` : ''}${sig}`
       } else {
         summaryLine = `⏳ 任务 ${String(data.task_id ?? '?')} ${String(data.status ?? '运行中')}——可用 wait_seconds 轮询等待`
       }

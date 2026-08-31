@@ -14,7 +14,7 @@ const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
 export function verifierUsageSection(defaultModel?: string): string {
   const modelNote = defaultModel ? ` Verifier model: ${defaultModel}.` : ''
-  return `You have an LLM-as-a-Verifier brain: one tool, \`verifier\`, with an action parameter (select / compare / track / progress_start / progress_update / progress_close / task_start / task_status) providing fine-grained verification (logprob-based rewards in [0,1]). Use it whenever a decision benefits from evidence instead of taste:${modelNote}
+  return `You have an LLM-as-a-Verifier brain: one tool, \`verifier\`, with an action parameter (select / compare / track / decompose / evaluate_session / progress_start / progress_update / progress_close / task_start / task_status / usage / config) providing fine-grained verification (logprob-based rewards in [0,1]). Use it whenever a decision benefits from evidence instead of taste:${modelNote}
 
 When to verify (action in parentheses):
 - Before committing a team (or yourself) to an implementation, verify the PLAN: compare 2-3 competing approaches with criteria "deep_review" — killing a wrong direction before dispatch is the cheapest fix available.
@@ -40,7 +40,7 @@ Reading the scores:
 - Prefer pairwise compare for small N (2-3): it is cheaper, faster, and more discriminating than a full tournament. Reserve select for larger pools.
 - Close margins are handled automatically: when a margin falls in the noise band the system re-evaluates (K=3, slot-alternating) and returns an averaged result with escalation metadata (escalated / k_used / margin_before / margin_after). Report these metadata alongside the outcome. If you see signal:"unstable", present all raw scores and recommend human review — never average them yourself.
 - If a result carries an anomaly/warning field (out-of-range scores were clipped into [0,1]), treat the score as UNRELIABLE — it suggests the scoring model misbehaved or was manipulated. Surface the warning to the user verbatim and recommend human review; do not rank on it silently.
-- Candidates carry a stable content TAG (8-hex of their text): select results include \`tags\`, compare results \`tag_a\`/\`tag_b\`. Across chained evaluations on subsets, refer to candidates BY TAG — positional letters shift between rounds, tags never do.
+- Candidates carry a stable content TAG (12-hex of their text): select results include \`tags\`, compare results \`tag_a\`/\`tag_b\`. Across chained evaluations on subsets, refer to candidates BY TAG — positional letters shift between rounds, tags never do.
 - Trust observed output, NOT the agent's narration: candidate summaries must be backed by verifiable evidence (smoke-test results, runtime-error counts, hard facts extracted from the actual artifact), never by the author's self-reported feature claims. When artifacts are runnable, smoke-test each one first (e.g. headless run + console-error capture) and feed the results into scoring; a candidate that crashes at runtime must be rejected regardless of its claims.
 
 Best-of-N means merge, not just rank:
@@ -80,5 +80,9 @@ A2. Lens-diverse parallel audits: each member delivers a COMPLETE audit report w
 A3. MECHANICAL CITATION CHECK by captain: verify ≥30% of citations per report at random, PLUS every fatal/severe finding, via grep/read. A wrong or fabricated citation invalidates that finding and halves the member's credibility weight at merge time.
 A4. MANDATORY CROSS-REVIEW: each member reads one other report and names its single most fatal unsupported claim (with counter-evidence).
 A5. verifier select("root_cause") over the corrected reports; flat or unstable verdict → no ranking, escalate to human review.
-A6. The final integrated report labels EVERY finding VERIFIED (citation reproduced by captain) or REPORTED (plausible, unchecked) — no unlabeled findings ship.`
+A6. The final integrated report labels EVERY finding VERIFIED (citation reproduced by captain) or REPORTED (plausible, unchecked) — no unlabeled findings ship.
+A7. RE-DERIVATION over consumption (regression audits): never consume a CHANGELOG "Fixed" adoption table — for EVERY claimed fix, reverse-check BOTH sides in code: the WRITE side (flag/field recorded) and the READ side (filter/guard consuming it); a missing write side = the claimed fix is dead code. Re-verify every "known/accepted" rationale against current code — "won't fix" must not rot into "forgot to fix".
+A8. BASELINE MATRIX = UNION of all known reports (yours AND other auditors'), then mechanically re-verify each baseline item as fixed / not-fixed / missed — findings absent from your matrix are the ones you will miss. Account test coverage SYMMETRICALLY per new function (TS side vs Python side).
+A9. CROSS-ENUMERATION & RUNTIME TRUTH: for each mechanism (cache, guard, sanitizer, allow-list), enumerate ALL handlers/paths/injection points — not just the one you reproduced. Comments and source-string judgments are claims to verify, not conclusions; when runtime evidence contradicts source-reading, trust runtime.
+A10. TOOL-ASSISTED FLOOR & TEST FIDELITY: run node scripts/audit_checks.mjs --full FIRST — its output is the deterministic floor (cite it; it is NOT your credit — your credit is independent findings BEYOND the floor plus reverse-check matrix quality). Then run node scripts/mutation_check.mjs — a regression test that stays green while its fix is mutated away is a FAKE test; report every one as a finding. For severity calls, a finding is only ranked after a verifier compare produces a NON-flat margin (a flat select carries no ranking signal, per discipline).`
 }

@@ -132,7 +132,7 @@ a verifier compare card with scores/badges means it works.
 /bestofn <audit goal description>          # AUDIT track: auto-selected for report deliverables
 ```
 
-BUILD/AUDIT track details, stable candidate tags (sha256[:8]) and budget gates: see the
+BUILD/AUDIT track details, stable candidate tags (sha256[:12]) and budget gates: see the
 Chinese README section «/bestofn 一键命令» — the protocol is identical.
 
 ### /vselftest one-click self-test (v0.7.0+)
@@ -257,6 +257,32 @@ Repo `Animal2404/dsh-verifier-Pro` ↔ package `@dsh-external/dsh-verifier-pro` 
 Depth presets `deep_review` / `root_cause` expand on every scoring path; hot-loadable
 `criteria/*.md` templates override them (see Chinese README or `criteria/TEMPLATE.md`).
 After switching scoring models run the discriminative gate: `node scripts/setup.mjs --bench`.
+
+### criteria security boundary (v0.7.5, 2026-08-29 N1)
+
+String `criteria` values are whitelisted to `[A-Za-z0-9_-]+` (no path characters) —
+the official backend may otherwise treat a string as a local file path and read
+arbitrary files into the scoring prompt (`llm_verifier/prompts.py:_read_criteria`).
+Free-form strings fail loudly; use a preset name or a description object (object
+values pass the same transport sanitizer as candidates).
+
+## Multimodal images: security boundary (v0.7.5+)
+
+`images` paths are agent-controlled local files — by default they are stripped
+(text-only backends). With `LLM_VERIFIER_ALLOW_IMAGES=1` every path must be inside
+the whitelist roots (`LLM_VERIFIER_IMAGE_ROOTS`; default: process cwd + system temp
+dir + `DSH_HOME` + `~/.dsh`) and ≤ `LLM_VERIFIER_IMAGE_MAX_MB` (default 8; `0` =
+reject every file). Both the TS tool layer and the Python bridge validate; symlinks
+are resolved (`realpath`) before the prefix check, and violations fail loudly. See
+SECURITY.md for the full disclosure.
+
+## Tooling / audit scripts
+
+`scripts/audit_checks.mjs` — mechanized Playbook self-check (static assertions;
+`--full` adds the npm test baseline; required before every release, RELEASING step 2).
+`scripts/mutation_check.mjs` — regression-test fidelity / mutation verification
+(a test that stays green while its fix is mutated away is a fake test; mutation
+scenarios need the repo-form `tests/`).
 
 ## Reference projects
 

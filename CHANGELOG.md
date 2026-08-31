@@ -2,6 +2,124 @@
 
 语义化版本。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.7.5] - 2026-08-28（双审计修复批：2026-08-27 原版 + 2026-08-28 改版报告）
+
+### Fixed（P0/P1）
+
+- **P1-1（已复现）**：smoke.mjs 排他锁永不释放 → 同 `--out` 第二次运行必失败（exit 3），且 evidence_chain 会把上次遗留的 `.smoke.json` 当本次新鲜证据渲染。修复：main 收尾 `finally` unlink + 陈旧锁（>15min，进程被杀残留）自动接管 + evidence_chain 在 smoke 无新鲜产出（exit 2/3 或零新文件）时清理 smokeDir 并中止。回归测试：`tests/smoke-lock.test.mjs`
+- **P1-2**：异步 `task_start(select)` 分支漏转发 `images`（compare 分支有、同步路径有）→ 多模态异步评选静默无图评分。补转发（`tools.ts` runner select 分支）
+- **A1（原版）**：`cached` 标记从不写入 history（v0.7.3 #5 修复失效，`cached !== true` 过滤是死代码）+ costGuard 在 k1 缓存判定之前执行（缓存命中可能被预算误拒）。修复：compare/select 无升级路径与 budget-skip 的历史记录补 `cached: k1WasCached`；costGuard 移到 k1 缓存命中判定之后（零 API 花费跳过守卫）
+- **B1（原版）**：`images` 任意本地文件读取+外发通道 → TS 侧 `sanitizeImagesParam` + 桥侧 `_validate_image_paths` 双层白名单（`LLM_VERIFIER_IMAGE_ROOTS`，缺省 cwd+系统临时目录+`DSH_HOME`）与大小上限（`LLM_VERIFIER_IMAGE_MAX_MB` 缺省 8MB），违规响亮报错；SECURITY.md 披露
+- **A2（原版）**：`maxEscalateK=2` 时方向矛盾被静默平均（`agreeing < ceil(k/2)` 恒假）→ unstable 阈值改 `floor(k/2)+1`（K=2 必须两轮一致，K=3 仍要求 ≥2）
+- **E1（原版）**：CI 从不跑全项目 typecheck（core 只编 5 模块、harness `--noCheck`）→ harness job 新增 `tsc -p tsconfig.json --noEmit` 步骤
+- **P2-1（审计项复核为误报）**：改版报告称 `prompt.ts:56` 有悬空反引号、第 57 行才是真闭合符——经 git HEAD 核验：56 行的反引号**就是**模板字面量闭合符（57 行为 `}`），src 本可编译、构建产物无裸反引号字符，报告作者把闭合符误读为多余字符。新增 `tests/prompt-hygiene.test.mjs`（反引号奇偶校验 + 12 action 首句回归）作为此类「模板字面量被污染」缺陷的机制防线
+- **P2-2**：npm `files` 白名单缺 `wrap_client.mjs`/`check_client.mjs`/`scan_logprob_models.py`/`e2e_bridge_test.py`/`verifier_cli.py`（tgz 内 `npm run build` 必失败、README 文档化工具不在包内）→ 补齐
+- **E3/E4（原版）**：Python handler 层与 bridge.ts 协议层零测试 → 新增 `tests/test_bridge_handlers.py`（随 CI bridge job）+ `tests/bridge.test.mjs`（桩桥协议回归：id 关联/错误帧/畸形帧/超时/崩溃重启/close）
+
+### Fixed（P2/P3）
+
+- A3：`clamp01(null)` 误报「越界裁剪」→ 新增 `missing` 归因，`scoreWarning` 区分缺失/越界文案（compare/select/track/progress 全站点）
+- A4：select 非升级路径补 `duration_ms`（degraded/flat/plain/budget-skip/esc-fail，compare 两处同步补齐）
+- A5：`candTag` 8-hex → 12-hex（与 smoke/build_evidence 产物哈希宽度对齐；**破坏性：历史标签会变**，prompt 文本同步）
+- A6：criteria JSON 数组形态显式拒绝（此前静默透传进桥，官方包行为未定义）
+- A10：`decompose`/`evaluate_session`/`progress_update` 补成本守卫（同步工具路径 + 异步 runner fall-through）
+- D2：prompt 首句 action 列表 8 → 12（补 decompose/evaluate_session/usage/config）
+- D4：桥 `_filter_kwargs` 对未知参数打 stderr 告警（此前静默丢弃）
+- D6：describe_visual 默认模型 `mimo-v2.5` → `mimo-v2.5-pro`（与桥模型档案对齐）
+- D7：`discriminative_check.py` 凭据值剥行内注释（`sk-x # note` 不再混入 key）
+- E2：CI pip 加 `<0.3.0` 上界（与 setup.mjs 钉扎一致）
+- P3-1：LRUCache `tick` 死代码删除（LRU 顺序靠 Map 插入序维护）
+- P3-3：describe_visual fetch 加 30s 超时（挂死端点不再拖垮证据链）
+- P3-4：describe_visual 凭据解析跳过注释行 + 剥行内注释（`# KEY:` 不再被当凭据）
+- P3-7：桥崩溃自动重启后重新 probe（`probeResult` 不再停留旧代数据）
+- P3-8：bridge 重试只在载荷**未写入**时进行（已写入后失败不重发，避免同一评分请求双计费）
+- P3-11：build_evidence `state` 序列化 2000 字符截断（不再静默撑爆证据块后被 10k 截断丢证据）
+- P3-14：面板冠军字母标 idx≥26 溢出修复（Excel 风格 `C26` 兜底）
+
+### Fixed（2026-08-28 二次审计 R2 批：修复批回归猎错）
+
+- **R2-1（P2·已复现）**：D4 告警噪音源①——`_handle_progress_update` 从不 pop 已消费的 `tracker_id`/`step`，每次 progress_update 都刷「dropped unknown params」→ 先 pop 再过滤；`test_bridge_handlers.py` 补集成式断言
+- **R2（P1）**：D4 告警噪音源②——`_sanitize_images` 剥离模式不再写 `ground_truth_note`（track/progress_start 的允许集不含它，写了必被误报为未知参数——狼来了效应）
+- **R2-3（P3）**：A1 修过头——k1 缓存命中跳过 costGuard 后，升级轮（reps/整场锦标赛）无美元守卫 → compare/select 升级前补 `if (k1WasCached) await costGuard(...)`
+- **R2-2（P3）**：images 白名单词法前缀可被 symlink/junction 绕过（指向根外文件）→ TS `realpathSync` + 桥 `os.path.realpath` 双侧解析后再判定；双侧补 symlink 越界用例
+- **R1（P1）**：白名单缺省根补 `~/.dsh`（/bestofn 产物目录），README 措辞与默认行为对齐
+- **R3（P2）**：evidence_chain 锁冲突清理只删**本次新建**的 smokeDir（运行前已存在的目录保留，避免删除并发活跃实例的输出）
+- **R5（P2）**：TS 侧 `sanitizeImagesParam` 补单测（新 `tests/images-whitelist.test.mjs`：放行/越界/symlink/过大/不存在 5 例）
+- **R6（P3）**：面板 idx≥26 兜底改真实 Excel 列名（A..Z → AA, AB...；修正上版 `C0` 命名）
+- **R2-4**：README.en 同步 B1 安全节；describe_visual usage 文案 `mimo-v2.5`→`mimo-v2.5-pro`；acceptance_test.mjs 跨平台解释器探测（`VB_PYTHON`/.venv 平台分支/裸回退）；progress_update 成本守卫估算桶对齐 `kind='progress'`（R2-4-7）
+- **R2-4-6 复核**：smoke 陈旧锁双实例同时接管**不会击穿互斥**（`openSync('wx')` 原子 + unlink 后 acquire 失败即 exit 3），补注释说明
+- **R4 记录**：15min 陈旧锁可能打断 >15min 的合法长跑（低概率；Windows 进程存活探测成本高，维持 mtime 判定）
+- **R7 记录**：P3-8「已写入后崩溃不重发」的取舍边界（桥读到请求前崩溃的请求也会丢失）已在 CHANGELOG 述明，维持
+- **R2-4-4 记录**：render_card_preview.mjs 硬编码作者路径（`E:/DeepSeek/...`）——不在 npm 包内、仅本地开发，维持
+
+### Fixed（2026-08-29 公平审计修复批：同题对比两版报告 13 项去重合并）
+
+> 背景：用统一提示词对「原版/改版」两版 Verifier 做同题审计对比（反污染纪律生效），合并两版发现去重后 13 项（3 项重叠互相印证 + 原版独有 7 + 改版独有 3），其中 **F7（假测试）与 F5/F8 直接命中本仓前两轮修复批的漏网**。全部修复 + 变异验证。
+
+- **F2（P2·最高）**：criteria 描述值**完全绕过传输层净化**——sanitizeForVerifier 只覆盖 problem/candidates/steps，criteria 值（与候选同槽进评分提示词）原样直达桥 → expandCriteria 收口内对每个描述值套 sanitize（10k 截断 + 控制符剥离 + 注入短语中性化）
+- **F14（测试中顺手发现）**：注入短语中性化的尾部 `\b` 词界可被「粘连后缀」绕过（`ignore all previous instructionsXXXX` 不被中性化但模型可读）→ 指令类两条短语去尾部 `\b`（头部保留防误报）
+- **F1/F3（P2）**：A6 数组 criteria 拒绝只挡同步字符串路径，task_start/服务缝经 expandCriteria 透传 → 数组拒绝上移到唯一收口
+- **F3（P2）**：progress 桶成本守卫结构性失效——gatedRequest 不对 progress_update 计量（且 method 名与桶名双错位）+ progress history 从不写 duration_ms → 计量白名单纳入 progress_update 并归一桶名、progress_update history 补 duration_ms
+- **F7（P3·方法论）**：R2-1 的『模拟构造』测试是**假测试**（测试体内自己 pop，删掉修复代码照样绿）→ 重写为真集成（桩 tracker 驱动真实 `_handle_progress_update`，变异敏感）+ 补 A2/A3/A6/P1-2 四类回归测试
+- **F4（P3）**：A3 缺失归因未同步 runner fall-through 两处 → scoreWarning
+- **F6（P3）**：fall-through 路径 images 缺 TS 白名单 → 统一过 sanitizeImagesParam
+- **F5（P3）**：README ZH/EN 仍写「sha256 前 8 位」（A5 修复漏文档）→ 12 位
+- **F8（P3）**：verifier_cli.py 凭据解析不剥行内注释（D7 家族在新文件回归）→ 同式修复
+- **F9（P3）**：images 白名单前缀比较大小写敏感 → Windows 小写配置根全部误拒 → 双侧比较前规范化（fail-closed 不变）
+- **F3'（P3）**：同步 progress_close 绕过共享并发闸门（五入口唯一缺口）→ 入闸
+- **F12（P4）**：清理陈旧双产物 lib/panelLogic.js（08-23 遗留，误导探针）
+- **F10/F11/F13 记录**：runner decompose/evaluate_session 分支不可达（防御性冗余）；verifier_cli 直连桥无 TS 护栏未文档化 + 数值 criteria 不拒；0.7.5 批次未提交（发布待办）
+
+### Added（改版独有武器：把「原版靠人眼赢」的能力机械化）
+
+- **mutation_check 扩展至 10 对（第二轮）**：新登记 N1 criteria 字符串白名单 / N4 degraded duration_ms / N2 P3-8 投递计数 / N3 F9 大小写（win32 平台限定 SKIPPED 语义）——**第二轮发现的每项修复都有变异敏感的真实测试**，原版两轮靠人眼抓到的假护栏/无护栏从此全部是工具自动防线
+- **`scripts/mutation_check.mjs`（测试保真度/变异验证）**：对每条「修复声明 ↔ 回归测试」对，临时把修复代码变异（替换/删除）后跑对应测试——测试必须变红，仍绿 = 假测试。首秀 **6 真 / 0 假**（含逐字节恢复校验）。原版审计员靠人眼看穿 F7 的能力，从此是改版的自动化防线
+- **audit_checks 扩展至 28 项**：F2 criteria 净化覆盖、F1 数组拒绝收口、F7 真集成断言
+- **AUDIT 轨协议 A10（工具地板 + 保真度）**：审计先跑 audit_checks（确定性地板，不计审计者功劳）+ mutation_check（假测试即发现）；严重性定级必须在 verifier compare 产出非 flat margin 之后才成立
+
+### Fixed（2026-08-29 第二轮同题审计修复批：原版 PROA + 改版 DSHR2X 合并 14 项）
+
+> 背景：第二轮公平对比（统一提示词 + 工具协议）——两版均执行审计/变异/判别纪律，改版 6 头部 vs 原版 3 头部，但**原版的 N1 是全场最重安全项**。按「原版能找出的改版也能找出」原则，两版全部发现合并修复，且每项修复都登记进 mutation_check 变异清单（10 对全真）。
+
+- **N1-P（P1 安全·原版 PROA）**：字符串 criteria 被官方包当「内置基准名或文件路径」——`llm_verifier/prompts.py:_read_criteria` 对存在的路径直接 `open()` 读任意本地文件并嵌入评分提示词外发（B1 同族通道，零设防）→ expandCriteria 白名单化（`/^[A-Za-z0-9_-]+$/`，路径形态响亮拒绝；旧契约「透传」即漏洞入口）；criteria-doc 测试同步更新为新契约
+- **N1-D（P2·改版 DSHR2X）**：A3 缺失归因在 progress 站点失效——`typeof null === 'object'` 使 null 分在到达 clamp01 前被短路（嵌套回归）→ clampSingleScore/runner fall-through 守卫改「字段存在」，null 进 clamp01 走 missing 归因
+- **N3-P（P2·原版）**：runner deps 漏传 criteriaDir——G3「criteria/*.md 模板全路径可用」在 task_start/服务缝//bestofn 静默失效 → 补传
+- **N5-D（P2·改版）**：升级轮成本守卫按单次估算，预算可超 escK 倍 → costGuard 加 multiplier，升级前按 escK 放大拦截
+- **N2-P（P3·原版）**：R2-4-6 注释「任意时刻至多一个实例持锁」绝对化错误（TOCTOU 反向交错：unlink 删掉对方新锁）→ unlink 前重读 mtime/size 比对 + 注释修正
+- **N4-D（P3·改版）**：compare degraded 分支漏 duration_ms（A4 只补了 budget-skip/esc-fail）→ 补 + 全分支断言测试
+- **N2-D（P3·改版）**：P3-8「已写入不重发」测试是假护栏（只断言错误类型）→ 桩桥投递计数 + 断言恰好 1 次（变异后 2 次必红）
+- **N3-D（P3·改版）**：F9 大小写规范化双侧零测试 → win32 小写配置根用例 + mutation 对
+- **N4-P（P3·原版）**：A1/A1b 两条 P1 修复只有静态计数守护、零行为测试 → 补行为测试（cached 写侧 / costGuard 主守卫 / escK 放大）
+- **N5-P（P4·原版）**：R2-1 旧假测试（测试体内自己 pop）未删除 → 删除，保留 _filter_kwargs 契约测试与真集成测试
+- **N6-P（P4·原版）**：evidence_chain 新鲜度聚合级判定（任一文件新鲜即放行）→ smoke 成功后清理本次未写盘的旧 .smoke.json（逐候选新鲜度）
+- **N7-P（P4·原版）**：bridge_fix docstring 声称探针传 `_observe=False` 但调用点未传 → 补传（文档与代码对齐）
+- **N8-P（P4·原版）**：wrap_client/check_client 构建日志把字符数标为 "bytes"（中文多字节致差 18046 vs 19389）→ 改 "chars"
+- **N9-P（P4·原版）**：同步 progress_update 静默忽略 images（与 runner 不对称）→ 补转发（过同一白名单）
+- **N10-P（P4·原版）**：`LLM_VERIFIER_IMAGE_MAX_MB=0` 被 `|| 8` 吞掉（想禁用反而得 8MB）→ TS/桥双侧保留 0 语义（拒绝任何文件，fail-closed）
+- **N7-D（P4·改版）**：R4「Windows 进程存活探测成本高」理由朽坏 → smoke 锁接 pid 存活探测（`process.kill(pid,0)`），长跑活跃实例的锁绝不接管
+- **N8-D（P4·改版）**：audit_checks B2 清点自污染（报 7 实 5）→ 排除自身与仅字符串提及文件
+- **N9-D（P4·改版）**：audit_checks/mutation_check 不入 npm files → 补入 + README 工具脚本节
+- **N10-D/N11-D 记录**：esc-fail/unstable history 模型归属错位（4 站点，`model: esc.escalationModel` 计入——低危记录）；compare exact-flat 不豁免候选相同（官方 0.5 回退语义，维持）
+
+### Added（改版独有武器：把「原版靠人眼赢」的能力机械化）
+
+### Added（L3 流程沉淀：Playbook 机械化）
+
+- **AUDIT 轨协议强化（A7-A9）**：把三轮审计沉淀的纪律写进 `bestOfNProtocolSection()`（/bestofn AUDIT 轨 + /vselftest 直接消费）——A7 反查式回归审计（禁止消费 CHANGELOG 采纳表结论：每条 Fixed 声明必须写方/读方双侧反查，缺写方 = 死代码修复；"不修"必须复核防烂成"忘了修"）、A8 基线矩阵取并集（自己 + 其他审计者的全部已知报告，逐项核 fixed/not-fixed/missed；新函数测试覆盖 TS/Python 对称记账）、A9 交叉枚举 + 运行时真值（每个机制枚举全部 handler/路径/注入点；注释与源码字符串判断是待验证声明，运行时证据与源码阅读矛盾时信运行时）。动因：改版审计员两轮共漏 5 项 + 2 处误报，根因全部是方法（污染/矩阵/枚举/验算）而非模型
+- **`scripts/audit_checks.mjs`（Playbook 机械化自检）**：把原版沉淀的 `AUDIT_PLAYBOOK-dsh-verifier-Pro.md`（12 类机械检测 + 4 个延伸项）转成零依赖可执行断言——A1 写读配对 / A1b+R2-3 守卫次序 / A2 阈值代入 / A3 归因 / A4 分支字段 / A5 哈希契约 / A6 数组拒绝 / A10 入口盘点 / B1 安全四问+第五问（symlink）/ D2-D3 三方对照 / E1-E4 CI 与测试盘点 / R2-1 D4 pop。`--full` 追加 npm test 运行基线。已接入 RELEASING.md 发布流程第 2 步
+- **打包补齐（audit_checks 首跑抓到）**：README 工具脚本节文档化的 `scripts/acceptance_ts.mjs`、`scripts/test_bestofn.mjs` 不在 npm files 白名单 → 补入（D3 类缺口，与 P2-2 同族）
+
+### 记录在案（不修，含理由）
+
+- **A8（原版）** token 计量并发串扰：需按请求归因重构，收益/风险比低，保留 VERIFIED 记录
+- **P3-5** /bestofn 本地 30min 预算与同步 300s 不一致：异步长任务需要 30min，属刻意设计
+- **P3-15** prompt 内嵌插件安装绝对路径：功能必需（agent 要运行证据链脚本），保留
+- **B2（原版）** 5 处手写 YAML 凭据解析器收敛：重构面大；D7/P3-4 已修复其中两处的行为漂移
+- **C5（原版）** persist 同步 I/O：数据量小，风险接受
+- **C1/P3-9（两版）** 桥内事件窗口化 drain 跨请求互串：代码注释已自述「已知并接受」（只影响告警不影响分数），维持原取舍
+- **D9/P3-12（两版）** 中文巨型注释与作者本地路径（`bridge_fix.py` 的 `E:\tmp\fix-e2\*.md` 等）：注释信息密度高、路径仅注释无功能影响，暂保留；后续清理作者路径
+- **F1/P3-10（两版）** monkey-patch 官方包（`call_verifier` 签名硬编码 5 参）：`<0.3.0` 钉扎 + fail-closed + probe 复核已缓解；升级时以 `tests/test_bridge_fix.py` 离线套件为门禁
+
 ## [0.7.4] - 2026-08-26（bestofn-refcomp 终版合并报告修复批）
 
 ### Fixed

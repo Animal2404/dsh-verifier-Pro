@@ -40,6 +40,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -163,8 +164,71 @@ def _attach_scoring_observations(out: dict[str, Any], since: float) -> None:
 
 
 def _filter_kwargs(kwargs: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
-    """Only forward parameters the official API accepts (avoids TypeErrors)."""
+    """Only forward parameters the official API accepts (avoids TypeErrors).
+
+    D4（2026-08-28 审计）：未知参数此前静默丢弃——用户传错参数名（如给
+    track 传 criteria）时无任何提示，与「criteria 缺失要响亮报错」的纪律
+    不一致。丢弃时打 stderr 告警。
+    """
+    dropped = [k for k in kwargs if k not in allowed]
+    if dropped:
+        sys.stderr.write(
+            "[verifier-brain] dropped unknown params (not forwarded to the "
+            f"official API): {', '.join(sorted(dropped))}\n"
+        )
     return {k: v for k, v in kwargs.items() if k in allowed}
+
+
+def _validate_image_paths(images: Any, method: str) -> None:
+    """B1（2026-08-28 审计）：images 白名单 + 大小上限（放行模式下）。
+
+    与 TS 侧 sanitizeImagesParam 同规则、同环境变量（双保险）：
+      LLM_VERIFIER_IMAGE_ROOTS   允许的根目录（os.pathsep 分隔；缺省 =
+                                 cwd + 系统临时目录 + DSH_HOME + ~/.dsh）
+      LLM_VERIFIER_IMAGE_MAX_MB  单文件上限（缺省 8）
+    违规路径响亮报错（ValueError → 错误响应），绝不静默放行。
+    R2-2（2026-08-28 二次审计）：前缀判定用 os.path.realpath——词法前缀可被
+    白名单根内的 symlink/junction 绕过（指向根外文件）。
+    """
+    refs: list[str] = []
+    if isinstance(images, (str, os.PathLike)):
+        refs = [str(images)]
+    elif isinstance(images, (list, tuple)):
+        refs = [str(i) for i in images if isinstance(i, (str, os.PathLike))]
+    roots_env = os.environ.get("LLM_VERIFIER_IMAGE_ROOTS", "")
+    roots = [os.path.abspath(r) for r in (
+        roots_env.split(os.pathsep) if roots_env else
+        [os.getcwd(), tempfile.gettempdir(), os.environ.get("DSH_HOME", ""),
+         os.path.join(os.path.expanduser("~"), ".dsh")]
+    ) if r]
+    # N10（2026-08-29 第二轮，原版 PROA）：MAX_MB=0 是合法配置（拒绝任何文件）——
+    # `or "8"` 会把 "0" 吞成 8，语义回退。空串才回落默认 8。
+    _max_mb_raw = os.environ.get("LLM_VERIFIER_IMAGE_MAX_MB", "")
+    max_mb = float(_max_mb_raw) if _max_mb_raw not in ("", None) else 8.0
+    max_bytes = max_mb * 1024 * 1024
+
+    def _norm(s: str) -> str:
+        # F9（2026-08-29 公平审计）：Windows 文件系统大小写不敏感——前缀判定前
+        # 规范化，避免 realpath 真实大小写与小写配置根误拒（fail-closed 不变）。
+        return s.lower() if os.name == "nt" else s
+
+    for img in refs:
+        if not os.path.isfile(img):
+            raise ValueError(f"verifier images: 路径不存在或不是文件（{img}）——images 只接受本地文件路径")
+        # R2-2：先解析符号链接再做前缀判定。
+        p = os.path.realpath(img)
+        pn = _norm(p)
+        if not any(pn == _norm(r) or pn.startswith(_norm(r) + os.sep) for r in roots):
+            raise ValueError(
+                f"verifier images: 路径不在白名单内（{img}）。允许的根目录：{'; '.join(roots)}"
+                "（可用环境变量 LLM_VERIFIER_IMAGE_ROOTS 扩展）——images 是任意文件读取+外发通道"
+            )
+        size = os.path.getsize(p)
+        if size > max_bytes:
+            raise ValueError(
+                f"verifier images: 文件过大（{img} = {size / 1024 / 1024:.1f}MB > {max_mb:.0f}MB，"
+                "LLM_VERIFIER_IMAGE_MAX_MB 可调）"
+            )
 
 
 def _sanitize_images(kwargs: dict[str, Any], method: str) -> None:
@@ -173,14 +237,18 @@ def _sanitize_images(kwargs: dict[str, Any], method: str) -> None:
     The official package base64-encodes non-empty `images` into
     {"type": "image_url", ...} content; text-only endpoints (DeepSeek) reject
     that with a 400. Default policy (safe first): drop images and note the
-    refs in ground_truth_note. Set LLM_VERIFIER_ALLOW_IMAGES=1 for multimodal
+    refs on stderr. Set LLM_VERIFIER_ALLOW_IMAGES=1 for multimodal
     backends (Vertex/Gemini).
+
+    B1（2026-08-28 审计）：即便 ALLOW_IMAGES=1，images 也是 agent 可控的
+    本地文件路径（任意文件读取+外发向量）——放行前强制白名单+大小校验。
     """
     images = kwargs.get("images")
     if not images:
         return
     allow = os.environ.get("LLM_VERIFIER_ALLOW_IMAGES", "").strip().lower()
     if allow in ("1", "true", "yes", "on"):
+        _validate_image_paths(images, method)
         return
     refs: list[str] = []
     if isinstance(images, (str, os.PathLike)):
@@ -188,13 +256,9 @@ def _sanitize_images(kwargs: dict[str, Any], method: str) -> None:
     elif isinstance(images, (list, tuple)):
         refs = [str(i) for i in images if isinstance(i, (str, os.PathLike))]
     kwargs.pop("images", None)
-    note = (
-        "[image refs] " + "; ".join(refs[:20])
-        + " (backend does not accept image_url messages; images ignored; "
-        "set LLM_VERIFIER_ALLOW_IMAGES=1 for multimodal backends)"
-    )
-    existing = kwargs.get("ground_truth_note")
-    kwargs["ground_truth_note"] = f"{existing}\n{note}" if existing else note
+    # R2（2026-08-28 二次审计）：剥离模式不再写 ground_truth_note——该字段只在
+    # select/compare 的允许集里；track/progress_start 的 _filter_kwargs 会把它
+    # 当未知参数告警（D4 自产噪音、狼来了效应）。忽略提示已由下方 stderr 承担。
     sys.stderr.write(
         f"[verifier-brain] {method}: stripped images (text-only backend); "
         "set LLM_VERIFIER_ALLOW_IMAGES=1 to pass them through\n"
@@ -679,7 +743,12 @@ def _handle_progress_update(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"unknown tracker_id: {tracker_id!r}")
     if not isinstance(step, str):
         raise ValueError("progress_update requires a `step` string")
-    kwargs = _filter_kwargs(dict(params), {"images"})
+    # R2-1（2026-08-28 二次审计）：tracker_id/step 是已消费参数——pop 后再过滤，
+    # 否则 D4 告警会每次 progress_update 都刷「dropped unknown params」噪音。
+    kwargs = dict(params)
+    kwargs.pop("tracker_id", None)
+    kwargs.pop("step", None)
+    kwargs = _filter_kwargs(kwargs, {"images"})
     _sanitize_images(kwargs, "progress_update")
     with lock:
         score = tracker.update(step, **kwargs)
@@ -714,8 +783,9 @@ def _handle_probe(params: dict[str, Any]) -> dict[str, Any]:
     _require_library()
     try:
         client = _get_client()
-        model = getattr(client, "model", None) or os.environ.get("OPENAI_MODEL", "unknown")
-        base_url = getattr(client, "base_url", None) or os.environ.get("OPENAI_BASE_URL", "unknown")
+        # str(): OpenAI SDK exposes httpx.URL here, which json.dumps rejects.
+        model = str(getattr(client, "model", None) or os.environ.get("OPENAI_MODEL", "unknown"))
+        base_url = str(getattr(client, "base_url", None) or os.environ.get("OPENAI_BASE_URL", "unknown"))
 
         if bridge_fix is not None:
             r = bridge_fix.probe_model_v2(client, str(model))

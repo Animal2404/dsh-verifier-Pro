@@ -19,7 +19,7 @@ gh release edit v0.5.0 --title "v0.5.0 — <一句话概括>"
 ## 发布流程
 
 1. `npm run verify`（typecheck + 全量测试）全绿
-2. **跑验收脚本**（如存在）：`node scripts/acceptance_ts.mjs` / `node scripts/test_bestofn.mjs` / `.venv/Scripts/python scripts/e2e_bridge_test.py`——跑失败 = 不发
+2. **跑验收脚本**（如存在）：`node scripts/audit_checks.mjs --full`（Playbook 机械化自检：12 类静态检测 + npm test 基线，见 AUDIT_PLAYBOOK 或脚本头注释）、`node scripts/acceptance_ts.mjs` / `node scripts/test_bestofn.mjs` / `.venv/Scripts/python scripts/e2e_bridge_test.py`——跑失败 = 不发
 3. **确认 CI 绿**：推当前 HEAD 触发 CI，等 `gh run list --limit 1` 显示 success（core/bridge/harness 三 job 全绿才算绿）。**CI 红 = 不发版**
 4. **版本号三处一致**：`package.json` version / `CHANGELOG.md` 最新条目 / git tag 必须一致；CHANGELOG 对照 `git log v上一版..HEAD --oneline` 逐条核对不遗漏
 5. `npm pack` 构建 tgz，检查产物：

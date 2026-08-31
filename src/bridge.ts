@@ -107,27 +107,34 @@ export class PythonBridge {
 
   async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     // Retry once if the bridge died between requests (crash auto-restart).
+    // P3-8（2026-08-28 审计）：仅当载荷【未写入】桥的 stdin 时才重试——已写入
+    // 后失败（桥中途崩溃/超时/响应丢失）绝不重发，避免同一评分请求被计费两次。
     for (let attempt = 0; attempt < 2; attempt++) {
+      const { promise, written } = this.requestOnce<T>(method, params, timeoutMs, signal)
       try {
-        return await this.requestOnce<T>(method, params, timeoutMs, signal)
+        return await promise
       } catch (error) {
         const recoverable = error instanceof BridgeError
-          && (error.type === 'PythonBridgeExit' || error.type === 'BridgeWriteError' || error.type === 'BridgeClosed')
+          && ((error.type === 'BridgeWriteError' || error.type === 'BridgeClosed')
+            || (error.type === 'PythonBridgeExit' && !written))
         if (!recoverable || attempt === 1 || this.closed) throw error
       }
     }
     throw new BridgeError('PythonBridgeError', 'unreachable') // appease the compiler
   }
 
-  private requestOnce<T>(method: string, params: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+  private requestOnce<T>(method: string, params: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal): { promise: Promise<T>; written: boolean } {
     this.start()
     const id = String(++this.seq)
     const payload = JSON.stringify({ id, method, params })
     // Per-call budget: sync tools use the plugin default; async verifier tasks
     // pass a much larger taskTimeoutMs so long tournament scorings survive.
     const budget = timeoutMs ?? this.timeoutMs
+    // P3-8：written = 载荷已交给桥（写入成功）。写失败回调会把它置回 false，
+    // request() 据此决定是否重试。
+    let written = false
 
-    return new Promise<T>((resolve, reject) => {
+    const promise = new Promise<T>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined
       let abortHandler: (() => void) | undefined
       // F5: one cleanup shared by every settle path — the caller's signal must
@@ -173,14 +180,24 @@ export class PythonBridge {
         reject(new BridgeError('BridgeWriteError', 'python bridge stdin is not writable'))
         return
       }
-      this.child.stdin.write(payload + '\n', (error) => {
-        if (error) {
-          this.pending.delete(id)
-          cleanup()
-          reject(new BridgeError('BridgeWriteError', `failed to write to python bridge: ${error.message}`))
-        }
-      })
+      try {
+        this.child.stdin.write(payload + '\n', (error) => {
+          if (error) {
+            written = false
+            this.pending.delete(id)
+            cleanup()
+            reject(new BridgeError('BridgeWriteError', `failed to write to python bridge: ${error.message}`))
+          }
+        })
+        written = true
+      } catch (e) {
+        written = false
+        this.pending.delete(id)
+        cleanup()
+        reject(new BridgeError('BridgeWriteError', `failed to write to python bridge: ${e instanceof Error ? e.message : String(e)}`))
+      }
     })
+    return { promise, written }
   }
 
   async probe(signal?: AbortSignal): Promise<ProbeResult> {

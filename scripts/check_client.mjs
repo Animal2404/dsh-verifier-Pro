@@ -24,4 +24,4 @@ try {
   console.error('FAIL: syntax error —', e.message)
   process.exit(1)
 }
-console.log(`client.js OK (${body.length} bytes, wrapper + syntax verified)`)
+console.log(`client.js OK (${body.length} chars, wrapper + syntax verified)`)

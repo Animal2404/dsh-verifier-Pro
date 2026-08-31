@@ -8,13 +8,20 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
+import { existsSync } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
 const scriptPath = join(ROOT, 'bridge', 'verifier_brain_bridge.py');
-const pythonBin = join(ROOT, '.venv', 'Scripts', 'python.exe');
+// R2-4-5（2026-08-28 二次审计）：跨平台解释器探测——env VB_PYTHON 优先，
+// 然后按平台查 .venv（Windows Scripts/ 与 POSIX bin/），最后回退裸解释器。
+const venvPython = process.platform === 'win32'
+  ? join(ROOT, '.venv', 'Scripts', 'python.exe')
+  : join(ROOT, '.venv', 'bin', 'python');
+const pythonBin = process.env.VB_PYTHON
+  || (existsSync(venvPython) ? venvPython : (process.platform === 'win32' ? 'python' : 'python3'));
 
 // 安全铁律：绝不 fallback 明文密钥。无 env 时跳过在线用例（审计 P0-1）。
 if (!process.env.OPENCODE_GO_API_KEY) {

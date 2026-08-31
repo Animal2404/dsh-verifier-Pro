@@ -15,10 +15,10 @@
  * raw instead of silently averaged.
  */
 import type { Context } from 'cordis'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { join, resolve, sep, delimiter as pathDelimiter } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync, unlinkSync } from 'node:fs'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { LRUCache, Semaphore } from './concurrency.js'
 import type { PythonBridge } from './bridge.js'
@@ -36,13 +36,16 @@ const LOOSE_OBJECT_SCHEMA = {
 
 /**
  * 稳定候选标签（用户反馈：连续多轮评选时 A/B/C 字母标会换指代——第二轮的
- * "A" 到底是第一轮的谁无从判断）。标签 = 候选文本 sha256 前 8 位十六进制：
+ * "A" 到底是第一轮的谁无从判断）。标签 = 候选文本 sha256 前 12 位十六进制
+ * （A5，2026-08-28 审计：与 smoke/build_evidence 的 artifactName 哈希宽度
+ * 对齐——8 位 32bit 生日碰撞概率非零，「不同候选必不同」的承诺在 12 位下
+ * 才成立）：
  * 同一候选在任何一轮评估里都是同一个标签，不同候选必不同；跨轮拼子集时
  * 按标签即可对回原始身份。
  */
 export function candTag(text: unknown): string {
   const s = typeof text === 'string' ? text : JSON.stringify(text) ?? ''
-  return createHash('sha256').update(s).digest('hex').slice(0, 8)
+  return createHash('sha256').update(s).digest('hex').slice(0, 12)
 }
 
 /** Below this margin a score pair counts as flat (handled by existing logic). */
@@ -79,8 +82,11 @@ const asToolResult = (value: unknown): Record<string, JsonValue> => value as Rec
  */
 const MAX_INPUT_LENGTH = 10_000
 const INJECTION_PHRASES: Array<[RegExp, string]> = [
-  [/\bignore\s+(all\s+)?previous\s+instructions?\b/gi, '[ignored phrase]'],
-  [/\bdisregard\s+(the\s+)?(above|prior|earlier)\s+instructions?\b/gi, '[ignored phrase]'],
+  // F14（2026-08-29 公平审计）：指令类短语的尾部 \b 词界可被「粘连后缀」绕过
+  // （"ignore all previous instructionsXXXX" 不被中性化，但评分模型仍可读）——
+  // 去掉这两条的尾部 \b（头部 \b 保留防 "xxignore" 误报；粘连误报率极低）。
+  [/\bignore\s+(all\s+)?previous\s+instructions?/gi, '[ignored phrase]'],
+  [/\bdisregard\s+(the\s+)?(above|prior|earlier)\s+instructions?/gi, '[ignored phrase]'],
   [/\byou\s+are\s+now\s+(a|an|the)\b/gi, '[role claim]'],
   [/\bsystem\s*:\s*$/gim, '[system marker]'],
 ]
@@ -92,6 +98,65 @@ function sanitizeForVerifier(text: string): string {
   out = out.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
   for (const [re, replacement] of INJECTION_PHRASES) out = out.replace(re, replacement)
   return out
+}
+
+/**
+ * B1（2026-08-28 审计）：`images` 参数是 agent 可控的本地文件路径，若原样
+ * 透传（LLM_VERIFIER_ALLOW_IMAGES=1 时）会构成「任意本地文件读取 + 外发到
+ * 评分后端」通道。这里加第二道闸：路径白名单 + 大小上限（Python 桥侧另有
+ * 同规则镜像，双保险）。
+ *
+ * 白名单根目录 = LLM_VERIFIER_IMAGE_ROOTS（path.delimiter 分隔；缺省 =
+ * 进程 cwd + 系统临时目录 + DSH_HOME + ~/.dsh——覆盖证据链/冒烟产物与
+ * /bestofn 产物所在位置）。
+ * 单文件上限 = LLM_VERIFIER_IMAGE_MAX_MB（缺省 8）。违规路径响亮报错。
+ * R2-2（2026-08-28 二次审计）：前缀判定用 realpath（解析符号链接）——
+ * 词法前缀可被白名单根内的 symlink/junction 绕过（指向根外文件）。
+ */
+function sanitizeImagesParam(images: string | undefined): string[] | undefined {
+  if (!images) return undefined
+  const raw = images.split(',').map((s) => s.trim()).filter(Boolean)
+  if (raw.length === 0) return undefined
+  const rootsEnv = process.env.LLM_VERIFIER_IMAGE_ROOTS
+  const roots = (rootsEnv ? rootsEnv.split(pathDelimiter) : [process.cwd(), tmpdir(), process.env.DSH_HOME, join(homedir(), '.dsh')])
+    .filter(Boolean)
+    .map((r) => resolve(String(r)))
+  // 原版 PROA N10（2026-08-29 第二轮）：MAX_MB=0 是合法配置（拒绝任何文件，
+  // fail-closed 禁用 images）——`Number(...) || 8` 会把 0 吞成 8，语义回退。
+  const maxMbRaw = Number(process.env.LLM_VERIFIER_IMAGE_MAX_MB)
+  const maxBytes = (Number.isFinite(maxMbRaw) ? maxMbRaw : 8) * 1024 * 1024
+  return raw.map((img) => {
+    const resolved = resolve(img)
+    if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+      throw new Error(`verifier images: 路径不存在或不是文件（${img}）——images 只接受本地文件路径`)
+    }
+    // R2-2：先解析符号链接再做白名单前缀判定——词法路径可被 symlink 绕过。
+    let p: string
+    try {
+      p = realpathSync(resolved)
+    } catch (e) {
+      throw new Error(`verifier images: 无法解析路径（${img}）：${e instanceof Error ? e.message : String(e)}`)
+    }
+    // F9（2026-08-29 公平审计）：Windows 文件系统大小写不敏感，但前缀比较大小写
+    // 敏感——realpathSync 返回真实大小写而 resolve(env 值) 保留用户大小写，
+    // 小写配置根会全部误拒。win32 上规范化为小写再比较（fail-closed 方向不变）。
+    const norm = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s
+    const np = norm(p)
+    if (!roots.some((root) => {
+      const nr = norm(root)
+      return np === nr || np.startsWith(nr + sep)
+    })) {
+      throw new Error(
+        `verifier images: 路径不在白名单内（${img}）。允许的根目录：${roots.join(' ; ')}` +
+        '（可用环境变量 LLM_VERIFIER_IMAGE_ROOTS 扩展）——images 是任意文件读取+外发通道，默认只放行工作区/临时目录/DSH_HOME/~/.dsh',
+      )
+    }
+    const size = statSync(p).size
+    if (size > maxBytes) {
+      throw new Error(`verifier images: 文件过大（${img} = ${(size / 1024 / 1024).toFixed(1)}MB > ${maxBytes / 1024 / 1024}MB，LLM_VERIFIER_IMAGE_MAX_MB 可调）`)
+    }
+    return p
+  })
 }
 
 function parseCriteria(raw: string | undefined): Criteria | undefined {
@@ -107,6 +172,13 @@ function parseCriteria(raw: string | undefined): Criteria | undefined {
       return trimmed
     }
     if (parsed && typeof parsed === 'object') {
+      // A6（2026-08-28 审计）：数组形态的 criteria 此前静默透传进桥（官方包
+      // 行为未定义）——显式拒绝，引导用描述对象或预设名。
+      if (Array.isArray(parsed)) {
+        throw new Error(
+          'criteria as a JSON array is not supported: use a description object ({"Correctness": "..."}) or a preset name (e.g. "deep_review" / "root_cause")',
+        )
+      }
       const obj = parsed as Record<string, unknown>
       // D-2: the official llm-verifier package has NO weight concept —
       // normalize_criteria stringifies numeric values into descriptions
@@ -193,17 +265,35 @@ const CRITERIA_PRESETS: Record<string, Record<string, string>> = {
 export function expandCriteria(criteria: Criteria | undefined, criteriaDir?: string): Criteria | undefined {
   if (typeof criteria === 'string') {
     const name = criteria.trim()
+    // 原版 PROA N1（2026-08-29 第二轮）：字符串 criteria 被官方包当作「内置基准名或
+    // 文件路径」——llm_verifier/prompts.py:_read_criteria 对存在的路径直接 open()
+    // 读任意本地文件并逐字嵌入评分提示词外发（B1 同族通道，此前零设防）。
+    // 白名单化：只放行无路径特征的名称（与目录模板加载器同款 [A-Za-z0-9_-]+ 契约）；
+    // 含 . / \ : 等路径字符的字符串一律拒绝（预设法 deep_review/terminal_bench 等不受影响）。
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      throw new Error(
+        'criteria as a free-form string is not supported: the official backend may treat it as a local file path (arbitrary file read + exfiltration to the scoring backend). Use a preset name (letters/digits/_- only, e.g. "deep_review" / "terminal_bench") or a description object.',
+      )
+    }
     const doc = loadCriteriaDoc(criteriaDir, name)
     if (doc) return doc
     const preset = CRITERIA_PRESETS[name]
     if (preset) return { ...preset }
     return criteria
   }
+  // F1/F3（2026-08-29 公平审计）：数组拒绝上移到真正的唯一收口——此前只挡在
+  // 同步字符串路径（parseCriteria），task_start/服务缝的对象路径经 expandCriteria
+  // 的 `!Array.isArray` 显式跳过，数组 criteria 仍原样抵达官方包（未定义行为）。
+  if (Array.isArray(criteria)) {
+    throw new Error(
+      'criteria as a JSON array is not supported: use a description object ({"Correctness": "..."}) or a preset name (e.g. "deep_review" / "root_cause")',
+    )
+  }
   // v0.7.3（外部评审 #3）：数值/权重对象的拒绝收到这个唯一收口（runSelect/
   // runCompare 顶部都调用本函数），覆盖「服务缝/对象路径」——此前 parseCriteria
   // 只在同步字符串路径拦，服务缝传对象会原样透传 → 官方包把 0.5 字符串化成
   // 无意义描述（D-2 要防的静默错评）。
-  if (criteria && typeof criteria === 'object' && !Array.isArray(criteria)) {
+  if (criteria && typeof criteria === 'object') {
     const obj = criteria as unknown as Record<string, unknown>
     const values = Object.values(obj)
     if (values.length > 0 && values.every((v) => typeof v === 'number')) {
@@ -211,6 +301,14 @@ export function expandCriteria(criteria: Criteria | undefined, criteriaDir?: str
         'criteria as a numeric/weight object is not supported: the llm-verifier backend treats criteria values as descriptions, so weights would silently become meaningless strings. Use a description object instead, e.g. {"Correctness": "checks the output is factually right"}',
       )
     }
+    // F2（2026-08-29 公平审计）：criteria 的描述值与候选文本同槽进入评分提示词
+    // ——必须过与 problem/candidates 相同的传输层加固（10k 上限 + 控制符剥离 +
+    // 注入短语中性化）。此前 criteria 值完全绕过 sanitize，是净化面的漏网之鱼。
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = typeof v === 'string' ? sanitizeForVerifier(v) : v
+    }
+    return out as Criteria
   }
   return criteria
 }
@@ -303,12 +401,21 @@ const topGap = (scores: unknown): number => {
  * scoring failure into a confident 0.0 "bad score" instead of a tie/degraded
  * signal.
  */
-function clamp01(value: unknown): { value: number; clamped: boolean } {
-  if (value === null || value === undefined) return { value: NaN, clamped: true }
+function clamp01(value: unknown): { value: number; clamped: boolean; missing: boolean } {
+  // A3（2026-08-28 审计）：缺失（null/undefined——桥侧把非有限浮点洗成 null）
+  // 与「越界」是两种归因——缺失 = 上游评分失败，不是「返回越界值被裁剪」。
+  if (value === null || value === undefined) return { value: NaN, clamped: true, missing: true }
   const n = Number(value)
-  if (!Number.isFinite(n)) return { value: NaN, clamped: false }
+  if (!Number.isFinite(n)) return { value: NaN, clamped: false, missing: false }
   const c = Math.min(1, Math.max(0, n))
-  return { value: c, clamped: c !== n }
+  return { value: c, clamped: c !== n, missing: false }
+}
+
+/** A3：区分「缺失（评分器未返回数值）」与「越界（已裁剪）」的告警文案。 */
+function scoreWarning(rawText: string, missing: boolean): string {
+  return missing
+    ? `⚠️ 评分缺失（评分器未返回数值：${rawText}）——疑似评分失败或模型异常，结果按缺失（NaN）处理，请人工复核。`
+    : `⚠️ 评分返回越界值已裁剪到 [0,1]（${rawText}）——疑似评分模型异常或被注入，请人工复核。`
 }
 
 /** P2-2: clamp a single numeric `score` result (progress_update) — exported
@@ -316,11 +423,15 @@ function clamp01(value: unknown): { value: number; clamped: boolean } {
  * out-of-range rewards are clipped and flagged as an anomaly so the caller
  * never mistakes a compromised score for a clean one. */
 export function clampSingleScore(result: Record<string, unknown>): void {
-  if (result && typeof result.score === 'number') {
+  // 改版 DSHR2X N1（2026-08-29 第二轮）：A3 缺失归因在 progress 站点失效——
+  // `typeof null === 'object'` 使 null 分（桥侧评分失败经 _jsonable 洗成 null）
+  // 在到达 clamp01 之前被短路，同步与 runner 两站全部静默。守卫改「字段存在」：
+  // null 也进 clamp01 → missing 归因（scoreWarning「缺失」+ anomaly）。
+  if (result && result.score !== undefined) {
     const c = clamp01(result.score)
     if (c.clamped) {
       result.anomaly = 'score_out_of_range'
-      result.warning = `⚠️ 评分返回越界分已裁剪到 [0,1]（raw: ${String(result.score)}）—— 疑似评分模型异常或被注入，请人工复核。`
+      result.warning = scoreWarning(`评分 raw: ${String(result.score)}`, c.missing)
     }
     result.score = c.value
   }
@@ -444,7 +555,7 @@ function recordTokenDelta(
   }
 }
 
-async function costGuard(deps: EscalationDeps, kind: 'select' | 'compare' | 'track'): Promise<void> {
+async function costGuard(deps: EscalationDeps, kind: 'select' | 'compare' | 'track' | 'progress', multiplier = 1): Promise<void> {
   const maxCost = deps.maxCostPerVerification
   const costInRate = deps.costPer1kInputTokens ?? 0
   const costOutRate = deps.costPer1kOutputTokens ?? 0
@@ -466,10 +577,12 @@ async function costGuard(deps: EscalationDeps, kind: 'select' | 'compare' | 'tra
     estimates.push((medianMs / 1000) * rate)
   }
   if (!estimates.length) return
-  const estUsd = Math.max(...estimates)
+  const estUsd = Math.max(...estimates) * multiplier
   // 单次拦截：仅按本次估算判断，不再叠加最近窗口累计（评审 #2）。
+  // 改版 DSHR2X N5（2026-08-29 第二轮）：升级轮按 escK 放大——升级锦标赛实际
+  // 花费 ≈ escK × 单次调用，单次视图会让预算可超 escK 倍而不触发。
   if (estUsd > maxCost) {
-    throw new Error(`verifier 成本预算拦截：本次单次估算 ~$${estUsd.toFixed(4)} 超过单次上限 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
+    throw new Error(`verifier 成本预算拦截：本次${multiplier > 1 ? `升级轮（×${multiplier}）估算` : '单次估算'} ~$${estUsd.toFixed(4)} 超过单次上限 $${maxCost}。提高 maxCostPerVerification 或改用便宜模型。`)
   }
 }
 
@@ -505,10 +618,13 @@ async function gatedRequest<T>(
   const bridge = await deps.getBridge()
   const exec = () => bridge.request<T>(method, params, deps.budgetMs(), signal)
   const run = () => (deps.scoringGate ? deps.scoringGate.run(exec, signal) : exec())
-  if (method !== 'select' && method !== 'compare' && method !== 'track') return run()
+  // F3（2026-08-29 公平审计）：progress_update 也是计费评分调用——纳入计量，
+  // 且计量桶归一为 'progress'（method 名与桶名错位曾令 REAL_TOKEN_STATS 恒空）。
+  if (method !== 'select' && method !== 'compare' && method !== 'track' && method !== 'progress_update') return run()
+  const meterKind = method === 'progress_update' ? 'progress' : method
   const before = await readTokenUsage(deps)
   const result = await run()
-  recordTokenDelta(method, before, await readTokenUsage(deps))
+  recordTokenDelta(meterKind, before, await readTokenUsage(deps))
   return result
 }
 
@@ -542,7 +658,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     ...(p.criteria !== undefined ? { criteria: p.criteria } : {}),
     ...(p.model ? { model: p.model } : {}),
     ...(p.n_evaluations !== undefined ? { n_evaluations: p.n_evaluations } : {}),
-    ...(p.images ? { images: p.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
+    ...(p.images ? { images: sanitizeImagesParam(p.images) } : {}),
   })
   // 稳定候选标签：跨轮评估时 A/B 字母会换指代，内容哈希标签不变。
   const tagA = candTag(p.candidate_a)
@@ -560,9 +676,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   // #11: budget guard lives here (not the tool handler) so async task_start,
   // the service seam and /bestofn — all of which flow through runCompare —
   // are covered too.
-  await costGuard(deps, 'compare')
-
+  // A1（2026-08-28 审计）：缓存命中（零 API 花费）必须跳过 costGuard——
+  // 原次序在 k1 缓存判定之前执行预算守卫，同一请求的第二次调用（命中 k1）
+  // 也会被按「本次估算成本」评估，预算收紧时被误拒。
   const k1WasCached = resultCache.has(baseKey + ':k1')
+  if (!k1WasCached) await costGuard(deps, 'compare')
   const k1 = await cached(baseKey + ':k1', () =>
     gatedRequest<Record<string, unknown>>(deps, 'compare', mkParams(false), signal)) as Record<string, unknown>
   // P0-5: clamp rewards into [0,1]; surface anomaly when clipping occurred.
@@ -570,7 +688,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   const cb = clamp01(k1.reward_b)
   if (ca.clamped || cb.clamped) {
     k1.anomaly = 'reward_out_of_range'
-    k1.warning = `⚠️ 评分返回越界值已被裁剪到 [0,1]（raw reward_a=${String(k1.reward_a)}, raw reward_b=${String(k1.reward_b)}）—— 疑似评分模型异常或被注入，请人工复核。`
+    k1.warning = scoreWarning(`raw reward_a=${String(k1.reward_a)}, raw reward_b=${String(k1.reward_b)}`, ca.missing || cb.missing)
   }
   k1.reward_a = ca.value
   k1.reward_b = cb.value
@@ -591,7 +709,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     && marginBefore <= deps.esc.escalateThreshold
 
   if (!doEscalate) {
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started })
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, cached: k1WasCached })
     if (compareExactFlat) {
       return {
         ...k1,
@@ -599,6 +717,9 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
         tag_b: tagB,
         cached: k1WasCached,
         escalated: false,
+        // 改版 DSHR2X N4（2026-08-29 第二轮）：degraded 分支补 duration_ms——
+        // A4 修复漏了此分支（只补了 budget-skip/esc-fail），flat 分支本就有。
+        duration_ms: Date.now() - started,
         signal: 'degraded',
         // F12（复盘 R-refcomp）：官方 compare 没有 on_error 参数（失败即 raise）——
         // 静默 0.5/0.5 的真机制是 extract_score 对无标签回复的字面回退，归因文案
@@ -636,6 +757,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
     }
   }
 
+  // R2-3（2026-08-28 二次审计）：k1 缓存命中时上面的 costGuard 被跳过，但升级
+  // reps 是真实付费调用——预算收紧时须在升级前按升级成本补一次美元守卫。
+  // 改版 DSHR2X N5：升级轮按 escK 放大估算（单次视图可超预算 escK 倍不触发）。
+  if (k1WasCached) await costGuard(deps, 'compare', Math.min(deps.esc.maxEscalateK, MAX_N_EVALUATIONS))
+
   // Budget watermark: estimate upgrade cost from real persisted durations.
   const est = await estimateCallMs(deps, 'compare')
   const avail = deps.budgetMs() - (Date.now() - started)
@@ -643,8 +769,8 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   const extraReps = Math.min(deps.esc.maxEscalateK - 1, extraAffordable)
   if (extraReps < 1) {
     // U-B3: budget-skip must land in history — estimateCallMs reads this file.
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
-    return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'budget_skipped_escalation', cached: k1WasCached })
+    return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, duration_ms: Date.now() - started, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
   // Extra reps with manual slot alternation (even reps swap, rewards swapped back).
@@ -672,7 +798,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       const rb = clamp01(r.reward_b)
       if (ra.clamped || rb.clamped) {
         r.anomaly = 'reward_out_of_range'
-        r.warning = `⚠️ 升级评估第 ${i} 轮返回越界值已裁剪到 [0,1]（raw a=${String(r.reward_a)}, b=${String(r.reward_b)}）`
+        r.warning = scoreWarning(`升级评估第 ${i} 轮 raw a=${String(r.reward_a)}, b=${String(r.reward_b)}`, ra.missing || rb.missing)
       }
       r.reward_a = ra.value
       r.reward_b = rb.value
@@ -683,7 +809,7 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
       if (reps.length < 2) {
         const msg = error instanceof Error ? error.message : String(error)
         deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'escalation_failed' })
-        return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${msg}` }
+        return { ...k1, tag_a: tagA, tag_b: tagB, cached: k1WasCached, escalated: false, duration_ms: Date.now() - started, note: `升级评估失败，保留首评结果：${msg}` }
       }
       process.stderr.write(`[verifier-brain] escalation rep ${i} failed, continuing with ${reps.length} reps: ${error instanceof Error ? error.message : String(error)}\n`)
       break
@@ -699,8 +825,11 @@ async function runCompare(deps: EscalationDeps, p: CompareParams, signal?: Abort
   const anyAnomaly = reps.some((r) => r.anomaly === 'reward_out_of_range')
   const anomalyWarning = reps.find((r) => typeof r.warning === 'string' && r.anomaly === 'reward_out_of_range')?.warning as string | undefined
 
+  // A2（2026-08-28 审计）：原阈值 ceil(kUsed/2) 在 maxEscalateK=2 时退化为
+  // 1——两轮胜者相反（agreeing=1）被判为一致而静默平均，违反自述纪律。
+  // 改为严格多数 floor(k/2)+1：K=2 必须两轮一致，K=3 仍要求 ≥2 一致。
   // Direction-inconsistent: report raw, never silently average.
-  if (agreeing < Math.ceil(kUsed / 2)) {
+  if (agreeing < Math.floor(kUsed / 2) + 1) {
     // U-B2: unstable results must be persisted for audit/cost accounting.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'compare', problem: p.problem, model: deps.esc.escalationModel ?? p.model, scores: [k1.reward_a, k1.reward_b], duration_ms: Date.now() - started, note: 'unstable' })
     const mcUnstable = literalMcNotes(k1.score_mode, marginBefore)
@@ -786,7 +915,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     ...(p.max_workers !== undefined ? { max_workers: p.max_workers } : {}),
     // F4: official contract is "every entry point accepts images" — the tool
     // layer used to silently drop them before they even reached the bridge.
-    ...(p.images ? { images: p.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
+    ...(p.images ? { images: sanitizeImagesParam(p.images) } : {}),
   })
 
   // F4: images in the key — same reason as compare (no TTL-window contamination).
@@ -820,9 +949,9 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // #11: budget guard lives here (not the tool handler) so async task_start,
   // the service seam and /bestofn — all of which flow through runSelect —
   // are covered too.
-  await costGuard(deps, 'select')
-
+  // A1：同 runCompare——k1 缓存命中（零 API 花费）跳过 costGuard。
   const k1WasCached = resultCache.has(baseKey + ':k1')
+  if (!k1WasCached) await costGuard(deps, 'select')
   const k1 = await cached(baseKey + ':k1', () =>
     gatedRequest<Record<string, unknown>>(deps, 'select',
       { ...mkParams(p.n_evaluations ?? 1), cache: selectCachePath }, signal)) as Record<string, unknown>
@@ -832,7 +961,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     const clamped = rawScores.map((s) => clamp01(s))
     if (clamped.some((c) => c.clamped)) {
       k1.anomaly = 'score_out_of_range'
-      k1.warning = `⚠️ 部分候选评分越界，已裁剪到 [0,1]（raw: ${JSON.stringify(rawScores)}）—— 疑似评分模型异常或被注入，请人工复核。`
+      k1.warning = scoreWarning(`部分候选评分 raw: ${JSON.stringify(rawScores)}`, clamped.some((c) => c.missing))
     }
     k1.scores = clamped.map((c) => c.value)
     // P2-③ 异常响应形态检测（扩展 exact-flat 单一护栏）：NaN / 全 0.5 /
@@ -860,13 +989,15 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
     && marginBefore <= deps.esc.escalateThreshold
 
   if (!doEscalate) {
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started })
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, cached: k1WasCached })
     if (exactFlat) {
       return {
         ...k1,
         tags: candTags,
         cached: k1WasCached,
         escalated: false,
+        // A4（2026-08-28 审计）：与 compare 一致，select 非升级路径也带耗时。
+        duration_ms: Date.now() - started,
         signal: 'degraded',
         warning: '⚠️ 全部候选精确等于 0.5 —— 这是评估批量失败被 on_error="tie" 掩蔽的特征（如上游 logprobs 故障），不是真实平局。本结果不可用于排名；建议换模型重试或人工复核。',
       }
@@ -880,6 +1011,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
         tags: candTags,
         cached: k1WasCached,
         escalated: false,
+        duration_ms: Date.now() - started,
         signal: 'flat',
         warning: k1.anomaly !== undefined
           ? `${String(k1.warning ?? '')} 且：所有候选得分相同或接近，排名无信号，必须用 compare 复核`
@@ -892,6 +1024,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
       tags: candTags,
       cached: k1WasCached,
       escalated: false,
+      duration_ms: Date.now() - started,
       // 审查 #6: literal-mc 采样路径的成本/置信提示。
       ...(mc.note ? { note: mc.note } : {}),
       ...(mc.warning ? { warning: typeof k1.warning === 'string' ? `${k1.warning}；${mc.warning}` : mc.warning } : {}),
@@ -903,12 +1036,16 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   // hardcoded 3 and silently ignored maxEscalateK on the select path (only
   // compare respected it). K=1 would not be an "escalation" at all.
   const escK = Math.max(2, Math.min(deps.esc.maxEscalateK, MAX_N_EVALUATIONS))
+  // R2-3（2026-08-28 二次审计）：同 compare——k1 缓存命中跳过上方 costGuard，
+  // 但整场升级锦标赛是真实付费调用，升级前补一次美元守卫。
+  // 改版 DSHR2X N5：整场升级锦标赛按 escK 放大估算。
+  if (k1WasCached) await costGuard(deps, 'select', escK)
   const elapsed = Date.now() - started
   const avail = deps.budgetMs() - elapsed
   if (avail < elapsed * escK * 1.1 || deps.esc.maxEscalateK < 2) {
     // U-B3: budget-skip must land in history — estimateCallMs reads this file.
-    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'budget_skipped_escalation' })
-    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
+    deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'budget_skipped_escalation', cached: k1WasCached })
+    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, duration_ms: Date.now() - started, note: '分差接近但剩余预算不足以升级评估次数，未升级' }
   }
 
   let escalated: Record<string, unknown>
@@ -936,7 +1073,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   } catch (error) {
     // U-B3: degraded-to-k1 is still a real scored call — log it.
     deps.store.appendHistory({ ts: new Date().toISOString(), kind: 'select', problem: p.problem, model: deps.esc.escalationModel ?? p.model, index: k1.index as number, scores: k1.scores, duration_ms: Date.now() - started, note: 'escalation_failed' })
-    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
+    return { ...k1, tags: candTags, cached: k1WasCached, escalated: false, duration_ms: Date.now() - started, note: `升级评估失败，保留首评结果：${error instanceof Error ? error.message : String(error)}` }
   }
 
   // R3-2: clamp escalated scores IMMEDIATELY (before the unstable branch) —
@@ -948,7 +1085,7 @@ async function runSelect(deps: EscalationDeps, p: SelectParams, signal?: AbortSi
   const escClamped = s3.map((v) => clamp01(v))
   if (escClamped.some((c) => c.clamped)) {
     escalated.anomaly = escalated.anomaly ?? 'score_out_of_range'
-    escalated.warning = `⚠️ 升级评估返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(s3)}）`
+    escalated.warning = scoreWarning(`升级评估 raw: ${JSON.stringify(s3)}`, escClamped.some((c) => c.missing))
   }
   s3 = escClamped.map((c) => c.value)
   escalated.scores = s3
@@ -1066,6 +1203,10 @@ export function createEscalationRunner(deps: EscalationDeps) {
         pivots: params.pivots as number | undefined,
         seed: params.seed as number | undefined,
         max_workers: params.max_workers as number | undefined,
+        // P1-2（2026-08-28 审计）：异步 runner 的 select 分支漏转发 images——
+        // compare 分支有、同步路径有，唯独这里丢：多模态异步评选（task_start+
+        // select+带图候选）会在无图条件下评分，且无任何提示。
+        images: params.images as string | undefined,
       })
     }
     // R3-3/R3-4: fall-through methods (track / progress_*) bypass runSelect/
@@ -1087,6 +1228,12 @@ export function createEscalationRunner(deps: EscalationDeps) {
       fallThroughParams.steps = (fallThroughParams.steps as unknown[])
         .map((s) => (typeof s === 'string' ? sanitizeForVerifier(s) : s))
     }
+    // F6（2026-08-29 公平审计）：fall-through 路径的 images 同样过 TS 白名单——
+    // 此前只有同步工具路径校验，task_start(track)/服务缝的 images 原样透传
+    //（桥侧剥离是后备层，但「双层校验」声明在部分路径实为单层）。
+    if (typeof fallThroughParams.images === 'string') {
+      fallThroughParams.images = sanitizeImagesParam(fallThroughParams.images)
+    }
     // U-N4: track 经 task_start / 服务缝到达时，checkpoint_steps 也要过与同步
     // 工具相同的校验（官方包对空/乱序/非整数行为未定义）。
     if (method === 'track' && fallThroughParams.checkpoint_steps !== undefined) {
@@ -1097,7 +1244,12 @@ export function createEscalationRunner(deps: EscalationDeps) {
     }
     // #11: track via task_start / service seam must respect the budget too
     // (runSelect/runCompare guard themselves; the fall-through does not).
-    if (method === 'track') await costGuard(deps, 'track')
+    // A10（2026-08-28 审计）：decompose/evaluate_session/progress_update 同为
+    // 真实评分调用，异步路径补成本守卫（与同步工具路径一致）。
+    // R2-4-7（2026-08-28 二次审计）：progress_update 的估算桶与 history 统计桶
+    // 对齐为 'progress'（decompose/evaluate_session 仍用 'track' 近似）。
+    if (method === 'track' || method === 'decompose' || method === 'evaluate_session') await costGuard(deps, 'track')
+    if (method === 'progress_update') await costGuard(deps, 'progress')
     const raw = await gatedRequest<Record<string, unknown>>(deps, method, fallThroughParams)
     // D-4: track/progress results are scores too — the async task path and
     // the service seam used to return them RAW (unclamped), letting
@@ -1108,17 +1260,20 @@ export function createEscalationRunner(deps: EscalationDeps) {
       const clamped = (out.scores as unknown[]).map((v) => clamp01(v))
       if (clamped.some((c) => c.clamped)) {
         out.anomaly = out.anomaly ?? 'score_out_of_range'
-        out.warning = `⚠️ ${method} 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(out.scores)}）`
+        // F4（2026-08-29 公平审计）：与同步站点一致用 scoreWarning——null（桥侧
+        // 洗非有限值）是「缺失」不是「越界裁剪」，旧文案误导复核方向。
+        out.warning = scoreWarning(`${method} raw: ${JSON.stringify(out.scores)}`, clamped.some((c) => c.missing))
       }
       out.scores = clamped.map((c) => c.value)
       return out
     }
-    if (raw && typeof raw === 'object' && typeof (raw as Record<string, unknown>).score === 'number') {
+    if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).score !== undefined) {
       const out = raw as Record<string, unknown>
+      // 改版 DSHR2X N1：null 分也进 clamp01（typeof 守卫曾短路 A3 缺失归因）。
       const c = clamp01(out.score)
       if (c.clamped) {
         out.anomaly = out.anomaly ?? 'score_out_of_range'
-        out.warning = `⚠️ ${method} 返回越界分已裁剪到 [0,1]（raw: ${String(out.score)}）`
+        out.warning = scoreWarning(`${method} raw: ${String(out.score)}`, c.missing)
       }
       out.score = c.value
       return out
@@ -1529,7 +1684,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               ...(args.checkpoint_steps !== undefined ? { checkpoint_steps: args.checkpoint_steps } : {}),
               ...(model ? { model } : {}),
               ...(trackN !== undefined ? { n_evaluations: trackN } : {}),
-              ...(args.images ? { images: args.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
+              ...(args.images ? { images: sanitizeImagesParam(args.images) } : {}),
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(trackExec, signal) : trackExec())
             // R3-2: track results are scores too — clamp before they reach the
@@ -1538,7 +1693,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               const clampedScores = (result.scores as unknown[]).map((v) => clamp01(v))
               if (clampedScores.some((c) => c.clamped)) {
                 result.anomaly = 'score_out_of_range'
-                result.warning = `⚠️ track 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(result.scores)}）`
+                result.warning = scoreWarning(`track raw: ${JSON.stringify(result.scores)}`, clampedScores.some((c) => c.missing))
               }
               result.scores = clampedScores.map((c) => c.value)
             }
@@ -1558,6 +1713,8 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               steps: decSteps.map((s) => sanitizeForVerifier(s)),
               ...(model ? { model } : {}),
             }, undefined, signal)
+            // A10：decompose 是真实评分调用，补成本守卫。
+            await costGuard(deps, 'track')
             let result = await (scoringGate ? scoringGate.run(decExec, signal) : decExec())
             // #14: decompose 偶发空响应/JSON 截断（模型隐藏推理吃光预算）——
             // 桥侧有重试，TS 侧补一次，避免用户手动重试。
@@ -1583,12 +1740,14 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               ...(model ? { model } : {}),
               ...(args.n_evaluations !== undefined ? { n_evaluations: boundParam(args.n_evaluations, MAX_N_EVALUATIONS) } : {}),
             }, undefined, signal)
+            // A10：evaluate_session 内部就是 track 评分，补成本守卫。
+            await costGuard(deps, 'track')
             const raw = await (scoringGate ? scoringGate.run(esExec, signal) : esExec())
             if (raw && Array.isArray(raw.scores)) {
               const clamped = (raw.scores as unknown[]).map((v) => clamp01(v))
               if (clamped.some((c) => c.clamped)) {
                 raw.anomaly = 'score_out_of_range'
-                raw.warning = `⚠️ track 返回越界分已裁剪到 [0,1]（raw: ${JSON.stringify(raw.scores)}）`
+                raw.warning = scoreWarning(`track raw: ${JSON.stringify(raw.scores)}`, clamped.some((c) => c.missing))
               }
               raw.scores = clamped.map((c) => c.value)
             }
@@ -1630,7 +1789,7 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
               problem: sanitizeForVerifier(psProblem),
               ...(model ? { model } : {}),
               ...(psN !== undefined ? { n_evaluations: psN } : {}),
-              ...(args.images ? { images: args.images.split(',').map((s: string) => s.trim()).filter(Boolean) } : {}),
+              ...(args.images ? { images: sanitizeImagesParam(args.images) } : {}),
             }, undefined, signal)
             const result = await (scoringGate ? scoringGate.run(psExec, signal) : psExec())
             // P3-3: progress_start confirms a tracker — it produces no score,
@@ -1644,22 +1803,34 @@ export function registerVerifierTools(ctx: Context, options: ToolsOptions): void
             // Hoist after guards (closure narrowing).
             const puTracker = args.tracker_id as string
             const puStep = args.step as string
+            // F3（2026-08-29 公平审计）：progress history 补 duration_ms——costGuard
+            // 的 'progress' 桶靠它取时长中位数，缺字段 = 守卫数据源恒空 = 永不触发。
+            const puStarted = Date.now()
             // R3-4/R3-5: sanitize the step text; the update itself scores.
             const puExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('progress_update', {
               tracker_id: puTracker,
               step: sanitizeForVerifier(puStep),
+              // 原版 PROA N9（2026-08-29 第二轮）：同步 progress_update 此前静默
+              // 忽略 images（与 runner 路径不一致）——补转发（过同一白名单）。
+              ...(args.images ? { images: sanitizeImagesParam(args.images) } : {}),
             }, undefined, signal)
+            // A10：progress_update 每次上报都是一次真实评分，补成本守卫。
+            // R2-4-7（2026-08-28 二次审计）：估算桶与 history 的 kind='progress' 对齐。
+            await costGuard(deps, 'progress')
             const result = await (scoringGate ? scoringGate.run(puExec, signal) : puExec())
             // P2-2: progress scores are rewards too — the P0-5 invariant
             // (clamp + anomaly flag) must cover progress_update like every
             // other numeric score (previously returned raw, bypassing clamp).
             clampSingleScore(result)
-            store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', tracker_id: args.tracker_id, step: args.step, model, scores: [result.score] })
+            store.appendHistory({ ts: new Date().toISOString(), kind: 'progress', tracker_id: args.tracker_id, step: args.step, model, scores: [result.score], duration_ms: Date.now() - puStarted })
             return asToolResult(result)
           }
           case 'progress_close': {
             if (!args.tracker_id) throw new Error('verifier progress_close requires `tracker_id`')
-            return asToolResult(await bridge.request<Record<string, unknown>>('progress_close', { tracker_id: args.tracker_id }, undefined, signal))
+            // F3'（2026-08-29 公平审计）：与 progress_start/update 一致走共享闸门——
+            // 此前是全部评分/进度入口中唯一绕闸的直连（服务缝版本反而在闸内）。
+            const pcExec = (): Promise<Record<string, unknown>> => bridge.request<Record<string, unknown>>('progress_close', { tracker_id: args.tracker_id }, undefined, signal)
+            return asToolResult(await (scoringGate ? scoringGate.run(pcExec, signal) : pcExec()))
           }
           case 'task_start': {
             // U-N1: only the three scoring methods may be scheduled.

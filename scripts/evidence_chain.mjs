@@ -16,7 +16,7 @@
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, rmSync, existsSync, unlinkSync } from 'node:fs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = dirname(__dirname)
@@ -86,6 +86,19 @@ function run(script, args) {
   return { code: r.status, stdout: r.stdout, stderr }
 }
 
+/** P1-1：目录内文件 → mtime 快照，用于判定 smoke 是否产生了本次的新记录。 */
+function snapshotDir(dir) {
+  try {
+    const out = {}
+    for (const f of readdirSync(dir)) {
+      try { out[f] = statSync(join(dir, f)).mtimeMs } catch { /* 文件间隙被删 */ }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
 async function main() {
   if (INPUTS.length === 0) {
     console.error('usage: node scripts/evidence_chain.mjs <artifactOrDir...> [--summary <text|file>] [--out <dir>]')
@@ -96,9 +109,45 @@ async function main() {
   const evDir = join(OUT, 'evidence')
 
   console.log('[1/3] smoke ...')
+  // P1-1（2026-08-28 审计）：smoke 失败时不得继续用旧产物渲染证据——此前
+  // 只看不判：锁冲突（exit 3）时 collectSmokeJsons 读到上次运行遗留的
+  // .smoke.json，陈旧证据被当作本次新鲜证据渲染。判定规则：
+  //   - exit 2/3（用法错误/锁冲突）：本次必然零产出 → 清理 smokeDir 并中止；
+  //   - 非 0 但本次确实写了新记录（候选冒烟失败，记录是新鲜的）：保留继续，
+  //     build_evidence 如实渲染失败（失败候选本就不进排名）。
+  // R3（2026-08-28 二次审计）：记录运行前 smokeDir 是否已存在——锁冲突（exit 3）
+  // 可能是「另一个活跃实例持有同一 --out」，此时绝不能删它的输出目录；只有
+  // 目录是本次新建（运行前不存在）时才允许清理。
+  const smokeDirPreExisted = existsSync(smokeDir)
+  const beforeSmoke = snapshotDir(smokeDir)
   const s = run('smoke.mjs', [...ABS_INPUTS, '--out', smokeDir])
-  if (s.code !== 0) console.log(s.stdout)
-  if (s.stderr) process.stderr.write(s.stderr)
+  const freshSmoke = snapshotDir(smokeDir)
+  const wroteFresh = Object.keys(freshSmoke).some((f) => !(f in beforeSmoke) || freshSmoke[f] > beforeSmoke[f])
+  if (s.code !== 0) {
+    if (s.stdout) console.log(s.stdout)
+    if (s.stderr) process.stderr.write(s.stderr)
+    if (s.code === 2 || s.code === 3 || !wroteFresh) {
+      if (!smokeDirPreExisted) {
+        rmSync(smokeDir, { recursive: true, force: true })
+        console.error(`evidence_chain: smoke 步骤失败（exit ${s.code}）且本次未产生新冒烟记录——已清理 ${smokeDir}（本次新建目录），防止陈旧证据被误用。证据链中止。`)
+      } else {
+        console.error(`evidence_chain: smoke 步骤失败（exit ${s.code}）且本次未产生新冒烟记录——${smokeDir} 运行前已存在（可能是并发活跃实例的输出），保留不删。证据链中止。`)
+      }
+      process.exit(1)
+    }
+    console.error(`evidence_chain: smoke 步骤有候选失败（exit ${s.code}），失败记录为本次产物，继续渲染。`)
+  }
+  if (s.code === 0) {
+    // 原版 PROA N6（2026-08-29 第二轮）：逐候选新鲜度——smoke 全成功时，本次
+    // 未写盘的旧 .smoke.json 必为历史残留（锁冲突分支的预存在目录保护不受影响），
+    // 清理掉，杜绝「部分候选零记录时旧证据冒充新鲜」的聚合级判定盲区。
+    for (const f of Object.keys(beforeSmoke)) {
+      if (!f.endsWith('.smoke.json')) continue
+      try {
+        if (statSync(join(smokeDir, f)).mtimeMs <= beforeSmoke[f]) unlinkSync(join(smokeDir, f))
+      } catch { /* 已被本次覆盖/删除 */ }
+    }
+  }
 
   console.log('[2/3] describe_visual ...')
   const smokeJsons = collectSmokeJsons(smokeDir)

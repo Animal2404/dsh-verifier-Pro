@@ -121,7 +121,12 @@ function renderSmoke(s) {
   if (s.stdoutTail) lines.push(`stdout(尾): ${s.stdoutTail.slice(0, 400).replace(/\r?\n/g, ' ⏎ ')}`)
   if (s.stderrTail) lines.push(`stderr(尾): ${s.stderrTail.slice(0, 400).replace(/\r?\n/g, ' ⏎ ')}`)
   if (s.screenshot) lines.push(`截图: ${s.screenshot}`)
-  if (s.state) lines.push(`状态: ${JSON.stringify(s.state)}`)
+  if (s.state) {
+    // P3-11（2026-08-28 审计）：state 无上限序列化会让证据块膨胀，进 verifier
+    // 后被 10k 截断（tools.ts sanitize）静默丢证据——先截断再进块。
+    const stateJson = JSON.stringify(s.state)
+    lines.push(`状态: ${stateJson.length > 2000 ? stateJson.slice(0, 2000) + ' …[truncated]' : stateJson}`)
+  }
   return lines.join('\n')
 }
 

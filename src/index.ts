@@ -139,6 +139,22 @@ export function apply(ctx: Context, config: Config): void {
   let probeResult: ProbeResult | null = null
   let probePromise: Promise<void> | null = null
 
+  const runProbe = (bridgeObj: PythonBridge): Promise<void> => (async () => {
+    try {
+      const result = await bridgeObj.probe()
+      probeResult = result
+      ctx.logger.info('verifier-brain: probe result: model=%s, base_url=%s, logprobs=%s%s',
+        result.model, result.base_url, result.logprobs_supported ? 'supported' : 'NOT SUPPORTED',
+        result.logprobs_error ? ` (error: ${result.logprobs_error})` : '')
+      if (!result.logprobs_supported) {
+        ctx.logger.warn('verifier-brain: logprobs NOT supported by current backend — scoring will fail or degrade. Check model/backend config.')
+      }
+    } catch (e) {
+      ctx.logger.warn('verifier-brain: probe failed: %s', e instanceof Error ? e.message : String(e))
+      probeResult = { model: 'unknown', base_url: 'unknown', logprobs_supported: false, logprobs_error: String(e), llm_verifier_version: 'unknown' }
+    }
+  })()
+
   const getBridge = async (): Promise<PythonBridge> => {
     if (!bridge) {
       bridge = new PythonBridge(
@@ -146,25 +162,18 @@ export function apply(ctx: Context, config: Config): void {
         pythonBin,
         config.bridgeTimeoutMs ?? 300_000,
         env,
-        (reason) => ctx.logger.warn('verifier-brain: bridge restarted (%s)', reason),
+        (reason) => {
+          ctx.logger.warn('verifier-brain: bridge restarted (%s)', reason)
+          // P3-7（2026-08-28 审计）：桥崩溃自动重启后重新探测——probePromise
+          // 此前只在首次建桥时创建，重启后新桥不再探测，probeResult 停留在
+          // 旧代数据（影响日志与告警路径）。
+          probeResult = null
+          probePromise = runProbe(bridge!)
+        },
       )
       // Probe on first bridge creation
       if (!probePromise) {
-        probePromise = (async () => {
-          try {
-            const result = await bridge.probe()
-            probeResult = result
-            ctx.logger.info('verifier-brain: probe result: model=%s, base_url=%s, logprobs=%s%s',
-              result.model, result.base_url, result.logprobs_supported ? 'supported' : 'NOT SUPPORTED',
-              result.logprobs_error ? ` (error: ${result.logprobs_error})` : '')
-            if (!result.logprobs_supported) {
-              ctx.logger.warn('verifier-brain: logprobs NOT supported by current backend — scoring will fail or degrade. Check model/backend config.')
-            }
-          } catch (e) {
-            ctx.logger.warn('verifier-brain: probe failed: %s', e instanceof Error ? e.message : String(e))
-            probeResult = { model: 'unknown', base_url: 'unknown', logprobs_supported: false, logprobs_error: String(e), llm_verifier_version: 'unknown' }
-          }
-        })()
+        probePromise = runProbe(bridge)
       }
     }
     return bridge
@@ -187,6 +196,10 @@ export function apply(ctx: Context, config: Config): void {
     esc: escalation,
     budgetMs: () => config.taskTimeoutMs ?? 1_800_000,
     scoringGate,
+    // 原版 PROA N3（2026-08-29 第二轮）：runner deps 此前漏传 criteriaDir——
+    // G3「criteria/*.md 模板全路径可用」在 task_start/服务缝//bestofn 三条路径
+    // 静默失效（字符串模板名原样透传官方包）。与工具侧同一目录。
+    criteriaDir: join(pluginRoot, 'criteria'),
     // #11: 异步任务 / 服务缝 / /bestofn 走同一个 runner——成本预算必须在这里
     // 也生效（runSelect/runCompare 内的 costGuard 读的就是这份配置）。
     maxCostPerVerification: config.maxCostPerVerification,

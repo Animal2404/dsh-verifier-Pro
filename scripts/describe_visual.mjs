@@ -3,7 +3,7 @@
  * M3 证据链自动化 — 五维视觉描述（多模态"眼睛"）。
  *
  * 用法:
- *   node scripts/describe_visual.mjs <image.png...> [--model mimo-v2.5]
+ *   node scripts/describe_visual.mjs <image.png...> [--model mimo-v2.5-pro]
  *       [--base-url https://opencode.ai/zen/go/v1] [--api-key-env OPENCODE_GO_API_KEY]
  *       [--json] [--out <dir>]
  *
@@ -18,7 +18,7 @@
  *     "raw": "完整描述文本"
  *   }
  *
- * 后端: OpenAI 兼容 chat/completions 多模态端点（默认 opencode-go 的 mimo-v2.5，
+ * 后端: OpenAI 兼容 chat/completions 多模态端点（默认 opencode-go 的 mimo-v2.5-pro，
  * 凭据键 OPENCODE_GO_API_KEY 自动读取 ~/.dsh/.credentials.yaml）。
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -26,7 +26,9 @@ import { homedir } from 'node:os'
 import { join, resolve, basename } from 'node:path'
 
 const OUT_DIR = resolve(process.argv[findArg('--out')] ?? join(process.cwd(), 'tmp_articles', 'describe'))
-const MODEL = process.argv[findArg('--model')] ?? 'mimo-v2.5'
+// D6（2026-08-28 审计）：默认模型名与桥侧模型档案（bridge_fix.py MODEL_PROFILES
+// 的 'mimo-v2.5-pro'）对齐——此前 'mimo-v2.5' 与档案漂移，读者无法判断是否为同一模型。
+const MODEL = process.argv[findArg('--model')] ?? 'mimo-v2.5-pro'
 const BASE_URL = process.argv[findArg('--base-url')] ?? 'https://opencode.ai/zen/go/v1'
 const API_KEY_ENV = process.argv[findArg('--api-key-env')] ?? 'OPENCODE_GO_API_KEY'
 const AS_JSON = process.argv.includes('--json')
@@ -50,9 +52,16 @@ function apiKey() {
   if (process.env[API_KEY_ENV]) return process.env[API_KEY_ENV]
   try {
     const text = readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
-    // trim 后匹配：兼容 DSH v1 refs: 节下缩进键（审计二修正——此前锚定行首假阴性）
-    const m = text.split(/\r?\n/).find((l) => l.trim() === API_KEY_ENV + ':' + '' || l.trim().startsWith(API_KEY_ENV + ':'))
-    if (m) return m.trim().slice(API_KEY_ENV.length + 1).trim().replace(/^["']|["']$/g, '')
+    // P3-4（2026-08-28 审计）：① 注释行（# KEY: ...）不得当凭据；② 行内注释
+    // （sk-x # note）此前混进 key 导致鉴权失败——取值后先剥行内注释；
+    // 引号值（"sk-x" / 'sk-x'）保留支持；refs: 节下缩进键经 trim 兼容。
+    const m = text.split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => !l.startsWith('#') && l.startsWith(API_KEY_ENV + ':'))
+    if (m) {
+      const value = m.slice(API_KEY_ENV.length + 1).replace(/\s+#.*$/, '').trim()
+      return value.replace(/^["']|["']$/g, '')
+    }
   } catch { /* best-effort */ }
   return undefined
 }
@@ -74,6 +83,9 @@ async function describeOne(imagePath) {
   const resp = await fetch(`${BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey()}` },
+    // P3-3（2026-08-28 审计）：fetch 无超时——挂死的端点会让 evidence_chain
+    // 的 spawnSync 一起卡住（最坏拖到 bestofn 外层 10min 硬超时）。30s 上限。
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({
       model: MODEL,
       messages: [{
@@ -102,7 +114,7 @@ async function describeOne(imagePath) {
 
 async function main() {
   if (IMAGES.length === 0) {
-    console.error('usage: node scripts/describe_visual.mjs <image.png...> [--model mimo-v2.5] [--json]')
+    console.error('usage: node scripts/describe_visual.mjs <image.png...> [--model mimo-v2.5-pro] [--json]')
     process.exit(2)
   }
   if (!apiKey()) {

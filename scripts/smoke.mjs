@@ -26,7 +26,7 @@
  *   headless Chrome（--remote-debugging-port）并随后关闭。
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, openSync, closeSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, openSync, closeSync, unlinkSync, readFileSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -482,15 +482,63 @@ async function main() {
   // S6: 同 OUT_DIR 并发互斥——两个实例若共享同一 --out（含同端口 CDP），
   // 会在同一 tab 上交错导航、互相污染证据。用排他锁文件拒绝并发。
   const lockPath = join(OUT_DIR, '.smoke.lock')
-  try {
-    const fd = openSync(lockPath, 'wx')
-    writeFileSync(fd, String(process.pid) + '\n')
-    closeSync(fd)
-  } catch {
-    console.error(`smoke: ${OUT_DIR} 正被另一个 smoke 实例使用（存在 .smoke.lock）。本次退出，避免证据互相污染。`)
-    process.exitCode = 3
-    return
+  // P1-1（2026-08-28 审计）：排他锁修复两件套——① 主流程 finally 释放（见
+  // main 收尾）；② 陈旧锁接管：锁文件带 pid + mtime 超龄（>15min；正常冒烟
+  // 最坏 ~7.5min）视为进程被杀/崩溃的残留，删除后重试一次，避免一次
+  // SIGKILL 就把该 --out 永久锁死。
+  // R2-4-6 修正（2026-08-29 第二轮，原版 PROA N2）：「任意时刻至多一个实例持锁」
+  // 的绝对化声明不成立——unlink 与 acquire 之间若对方先获取新锁，本方的 unlink
+  // 会删掉对方的新锁（TOCTOU 反向交错）。修复：unlink 前重读锁 mtime/size 比对，
+  // 确认仍是「我方判定过的那把陈旧锁」才删除。
+  // N7（改版 DSHR2X）：锁文件含 pid——process.kill(pid,0) 是 O(1) 存活探测，
+  // R4「Windows 探测成本高」不成立。存活 pid 的锁（>15min 合法长跑实例）绝不接管。
+  const STALE_LOCK_MS = 15 * 60_000
+  const acquireLock = () => {
+    try {
+      const fd = openSync(lockPath, 'wx')
+      writeFileSync(fd, String(process.pid) + '\n')
+      closeSync(fd)
+      return true
+    } catch {
+      return false
+    }
   }
+  const pidAlive = (pidText) => {
+    const pid = Number(String(pidText ?? '').trim())
+    if (!Number.isInteger(pid) || pid <= 0) return null // 无法解析——退回 mtime 判定
+    try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' ? true : false }
+  }
+  if (!acquireLock()) {
+    let stale = false
+    let staleStat = null
+    try {
+      const st = statSync(lockPath)
+      const ownerAlive = pidAlive(readFileSync(lockPath, 'utf8'))
+      if (ownerAlive !== true) {
+        stale = Date.now() - st.mtimeMs > STALE_LOCK_MS
+        if (stale) staleStat = st
+      }
+    } catch { /* 锁在检查间隙消失（另一实例恰好释放）——走正常竞争 */ }
+    if (stale && staleStat) {
+      // N2：unlink 前重读——若锁已被对方替换（mtime/size 不同 = 新锁），不得删除。
+      let stillSame = false
+      try {
+        const st2 = statSync(lockPath)
+        stillSame = st2.mtimeMs === staleStat.mtimeMs && st2.size === staleStat.size
+      } catch { stillSame = false }
+      if (stillSame) { try { unlinkSync(lockPath) } catch { /* best-effort */ } }
+      if (!acquireLock()) {
+        console.error(`smoke: ${OUT_DIR} 的 .smoke.lock 超龄（>15min）但仍无法接管——可能是活跃实例或权限问题。本次退出。`)
+        process.exitCode = 3
+        return
+      }
+    } else {
+      console.error(`smoke: ${OUT_DIR} 正被另一个 smoke 实例使用（存在 .smoke.lock，内容为 pid；长跑实例即使超 15min 也不接管）。本次退出，避免证据互相污染。`)
+      process.exitCode = 3
+      return
+    }
+  }
+  try {
   const RUNNABLE_NODE = new Set(['.js', '.mjs', '.cjs'])
   const htmlFiles = files.filter(f => kindOf(f) === 'html')
   // vselftest-m8：显式传入的非可运行文件（.md/.txt/…）不再被当 Node 脚本执行
@@ -567,6 +615,12 @@ async function main() {
   // 自然退出（避免 process.exit 与 WebSocket/child 清理竞态触发 UV 断言）。
   // vselftest-m8：unsupported 候选不计入失败（它们没被执行，不是崩溃）。
   process.exitCode = results.filter(r => r.kind !== 'unsupported').every(r => r.ok) ? 0 : 1
+  } finally {
+    // P1-1（2026-08-28 审计）：排他锁随主流程释放——正常完成/异常退出都走
+    // finally。此前永不删除：同 --out 第二次运行必失败（exit 3），且
+    // evidence_chain 会把上次遗留的 .smoke.json 当本次新鲜证据。
+    try { unlinkSync(lockPath) } catch { /* best-effort */ }
+  }
 }
 
 main().catch(e => { console.error('smoke fatal:', e); process.exit(1) })

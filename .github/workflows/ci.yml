@@ -79,10 +79,16 @@ jobs:
 
       - name: Install llm-verifier
         run: |
-          python -m pip install --quiet "llm-verifier>=0.2.0"
+          # E2（2026-08-28 审计）：与 setup.mjs 的钉扎一致，加 <0.3.0 上界——
+          # 否则 CI 可能先于用户踩到上游 0.3.x 破坏性变更。
+          python -m pip install --quiet "llm-verifier>=0.2.0,<0.3.0"
 
-      - name: bridge_fix offline suite
-        run: python tests/test_bridge_fix.py
+      - name: bridge_fix offline suite + Python handler unit tests
+        run: |
+          python tests/test_bridge_fix.py
+          # E3（2026-08-28 审计）：Python handler 层（校验/过滤/图像剥离）此前
+          # 无 CI 测试——新增单元测试随 bridge job 一起跑。
+          python tests/test_bridge_handlers.py
 
   # 全量 job（审查 #2）：此前 harness 依赖的 tools.ts/bestofn 测试只在本地跑。
   # DSH 宿主 peer 无法从公共 registry 完整安装，但 `pnpm add @deepseek-ai/dsh`
@@ -105,6 +111,14 @@ jobs:
           # 依赖不存在的 @deepseek-ai/dsh-type-meta；dsh-client-runtime 依赖不存在的
           # dsh-compact，但 host 源码不用它）。cordis 无 scope 版本 4.0.0-rc.8。
           pnpm add --ignore-workspace @deepseek-ai/dsh-tools@0.1.1-rc.2 cordis@4.0.0-rc.8 schemastery 2>&1 | tail -3
+
+      - name: Full-project typecheck (E1: guards type regressions CI-wide)
+        # E1（2026-08-28 审计）：core job 只编译 5 个模块、harness 用 --noCheck
+        # 转译——全项目 typecheck 此前从未在任何 CI job 执行，tools.ts/bridge.ts/
+        # bestofn.ts 的类型错误只能靠本地。此 step 装 @types/node 后全量检查。
+        run: |
+          pnpm add --ignore-workspace @types/node@24 2>&1 | tail -1
+          npx --yes -p typescript@5.9 tsc -p tsconfig.json --noEmit
 
       - name: Transpile host with tsc --noCheck (runnable JS, not type-checked)
         # 不装 @types/node：--noCheck 只转译不检查类型；且 npm 在 pnpm 布局的

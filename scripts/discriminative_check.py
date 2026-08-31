@@ -79,11 +79,13 @@ def resolve_client(args):
             if not api_key:
                 m = re.search(r"^\s*(DEEPSEEK_API_KEY|OPENAI_API_KEY|OPENCODE_GO_API_KEY|OPENROUTER_API_KEY)\s*:\s*(.+?)\s*$", text, re.M)
                 if m:
-                    api_key = m.group(2).strip().strip("'\"")
+                    # D7（2026-08-28 审计）：值带行内注释（sk-x # note）会混进
+                    # key 导致鉴权失败——取值后先剥注释再剥引号。
+                    api_key = re.sub(r"\s+#.*$", "", m.group(2)).strip().strip("'\"")
             if not base_url:
                 m = re.search(r"^\s*OPENAI_BASE_URL\s*:\s*(.+?)\s*$", text, re.M)
                 if m:
-                    base_url = m.group(2).strip().strip("'\"")
+                    base_url = re.sub(r"\s+#.*$", "", m.group(2)).strip().strip("'\"")
         except Exception:
             pass
     if not base_url or not api_key:

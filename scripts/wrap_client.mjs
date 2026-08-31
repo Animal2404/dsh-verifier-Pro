@@ -38,4 +38,4 @@ const footer = `
 `
 
 writeFileSync(target, banner + body + footer)
-console.log(`wrap_client: wrapped ${PKG_ID} (${body.length} → ${body.length + banner.length + footer.length} bytes)`)
+console.log(`wrap_client: wrapped ${PKG_ID} (${body.length} → ${body.length + banner.length + footer.length} chars)`)

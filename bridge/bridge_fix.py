@@ -666,8 +666,12 @@ def _probe_tag_emission(client, resolved: str, model: str,
     profile = profile_for(model) or {}
     budget = max_tokens or profile.get("probe_max_tokens") or profile.get("max_tokens") or 4096
     try:
+        # N7（2026-08-29 第二轮，原版 PROA）：docstring 声称「Probe calls pass
+        # _observe=False so a failed probe is not misread as a scoring-format
+        # regression」但调用点从未传——探针响应被计入 _observe_score_tags 的
+        # 3-strike 降级计数，与设计意图相反。补传 _observe=False（文档与代码对齐）。
         text, _, _ = call_no_logprobs(client, _TAG_PROBE_PROMPT, resolved,
-                                      max_tokens=budget)
+                                      max_tokens=budget, _observe=False)
     except Exception:
         return None
     if not text:
