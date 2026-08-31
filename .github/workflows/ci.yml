@@ -112,7 +112,7 @@ jobs:
           # dsh-compact，但 host 源码不用它）。cordis 无 scope 版本 4.0.0-rc.8。
           pnpm add --ignore-workspace @deepseek-ai/dsh-tools@0.1.1-rc.2 cordis@4.0.0-rc.8 schemastery 2>&1 | tail -3
 
-      - name: Full-project typecheck (E1: guards type regressions CI-wide)
+      - name: 'Full-project typecheck (E1: guards type regressions CI-wide)'
         # E1（2026-08-28 审计）：core job 只编译 5 个模块、harness 用 --noCheck
         # 转译——全项目 typecheck 此前从未在任何 CI job 执行，tools.ts/bridge.ts/
         # bestofn.ts 的类型错误只能靠本地。此 step 装 @types/node 后全量检查。
