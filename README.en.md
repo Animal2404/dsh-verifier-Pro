@@ -144,6 +144,23 @@ Zero-argument AUDIT-track team audit of the plugin itself:
 /vselftest <focus note>   # custom focus
 ```
 
+### /vrank one-click ranking (v0.7.6+, zero subagents)
+
+Already have 2-8 candidates in hand? Skip the team — the current agent calls the
+Verifier directly and returns a ranking:
+
+```
+/vrank Which plan is better | plan-A full text | plan-B full text
+/vrank Which report is trustworthy | report-a.md | report-b.md   # file paths are read
+```
+
+Discipline built in: **2 candidates → compare** (cheaper, more discriminating);
+**≥3 → select** (`n_evaluations=1`); a **flat select auto-confirms the top two with
+compare**; a confirm still inside the noise band → "no reliable winner, candidates
+tied"; **unstable → raw scores + human-review advice**, never an invented ranking.
+Division of labor vs /bestofn: candidates already exist → /vrank (seconds);
+candidates must be **generated** → /bestofn (spawns a team).
+
 ## Configuration
 
 ```yaml

@@ -32,7 +32,7 @@ jobs:
           # npm install 必须 --legacy-peer-deps：本仓库 peer 世界有冲突
           # （dsh-brand/dsh-invariants 等），不带会 ERESOLVE 卡死 10 分钟。
           npm install --no-save --no-audit --no-fund --legacy-peer-deps @types/node@24
-          npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts src/client/panelLogic.ts \
+          npx --yes -p typescript@5.9 tsc src/credentials.ts src/concurrency.ts src/persist.ts src/types.ts src/vrank.ts src/client/panelLogic.ts \
             --outDir lib --rootDir src --module nodenext --moduleResolution nodenext \
             --target es2022 --skipLibCheck --esModuleInterop
 
@@ -42,6 +42,7 @@ jobs:
           node --test tests/concurrency.test.mjs
           node --test tests/build_evidence.test.mjs
           node --test tests/panel-logic.test.mjs
+          node --test tests/vrank.test.mjs
 
       - name: Test-import guard (CI-compiled modules only)
         # #13: 防止「本地 tsc 全量编译能过、CI 缺模块挂」的不一致——
@@ -50,8 +51,8 @@ jobs:
         run: |
           python - <<'EOF'
           import re, pathlib, sys
-          compiled = {'credentials.js','concurrency.js','persist.js','types.js','client/panelLogic.js'}
-          ci_tests = {'credentials.test.mjs','concurrency.test.mjs','build_evidence.test.mjs','panel-logic.test.mjs'}
+          compiled = {'credentials.js','concurrency.js','persist.js','types.js','vrank.js','client/panelLogic.js'}
+          ci_tests = {'credentials.test.mjs','concurrency.test.mjs','build_evidence.test.mjs','panel-logic.test.mjs','vrank.test.mjs'}
           bad = []
           for name in ci_tests:
               t = pathlib.Path('tests') / name

@@ -24,6 +24,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
 import type { EscalationDeps } from './tools.js'
+import { parseVRankInput, buildVRankOutput, buildVRankRunnerParams, buildVRankConfirmParams } from './vrank.js'
 
 const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
@@ -657,4 +658,43 @@ export function registerSelfTestCommand(ctx: Context): void {
       }
     },
   }), 'verifier-brain: /vselftest command')
+}
+
+// ---------------------------------------------------------------------------
+// /vrank —— 不调用子代理的一键 Verifier 排名（2026-08-29 用户需求）。
+// 与 /bestofn 团队模式的分工：团队模式派 N 个成员「生成」候选再优选；
+// /vrank 面向「候选已经在我手上」的场景——用户直接给 2-8 段文本或文件路径，
+// 当前 agent 自己调 runner（select/compare）出排名，零 spawn、零协议激活。
+// 判别纪律内建：N=2 用 compare（更便宜更有区分度）；select flat 自动 compare
+// 前二复核；仍 flat/unstable → 如实呈现"无可靠冠军"，绝不编造排名。
+// 纯函数（解析/输出/参数构造）在 ./vrank.ts——零宿主依赖，CI core 可编译测试。
+// ---------------------------------------------------------------------------
+export function registerVRankCommand(ctx: Context, deps: {
+  runner: (method: string, params: Record<string, unknown>) => Promise<unknown>
+}): void {
+  ctx.effect(() => ctx.commands.register({
+    name: 'vrank',
+    description: 'Direct Verifier ranking, zero subagents: /vrank <problem> | <candidate1> | <candidate2> ... (candidates may be file paths; N=2 uses compare, N>=3 uses select, flat is auto-confirmed)',
+    input: { hint: '<problem> | <candidate1> | <candidate2> [...]   (candidates may be file paths; 2-8 candidates)' },
+    async handler(invocation) {
+      const raw = invocation.rawInput.trim()
+      const baseDir = invocation.agent.session?.header?.cwd || process.cwd()
+      const plan = parseVRankInput(raw, baseDir)
+      if (plan.error) {
+        return { kind: 'error', text: `/vrank: ${plan.error}` }
+      }
+      try {
+        const mode: 'select' | 'compare' = plan.texts.length === 2 ? 'compare' : 'select'
+        const result = await deps.runner(mode, buildVRankRunnerParams(mode, plan.problem, plan.texts)) as Record<string, unknown>
+        // 判别纪律：flat 无排名信号 → 自动 compare 前二复核。
+        const confirmParams = mode === 'select' ? buildVRankConfirmParams(plan.problem, plan.texts, result) : null
+        const confirm = confirmParams
+          ? await deps.runner('compare', confirmParams) as Record<string, unknown>
+          : undefined
+        return { kind: 'success', text: buildVRankOutput(mode, plan.labels, result, confirm) }
+      } catch (e) {
+        return { kind: 'error', text: `/vrank 失败: ${e instanceof Error ? e.message : String(e)}` }
+      }
+    },
+  }), 'verifier-brain: /vrank command')
 }

@@ -30,7 +30,7 @@ import { verifierUsageSection, bestOfNProtocolSection } from './prompt.js'
 import { VerifierBrainService } from './service.js'
 import { createEscalationRunner, createVerifierTaskManager, registerVerifierTools } from './tools.js'
 import { Semaphore } from './concurrency.js'
-import { registerBestOfNCommand, registerSelfTestCommand } from './bestofn.js'
+import { registerBestOfNCommand, registerSelfTestCommand, registerVRankCommand } from './bestofn.js'
 
 export const name = '@dsh-external/dsh-verifier-pro'
 export const inject = ['tools', 'systemPrompt']
@@ -248,6 +248,8 @@ export function apply(ctx: Context, config: Config): void {
     })
     // 一键自检：对插件自身发起 AUDIT 轨团队审计（用户要求的一键命令）。
     registerSelfTestCommand(commandCtx)
+    // 一键排名：不调用子代理，当前 agent 直接用 Verifier 给手头候选排名。
+    registerVRankCommand(commandCtx, { runner })
   })
 
   if (config.promptSection ?? true) {
