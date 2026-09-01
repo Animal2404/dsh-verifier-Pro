@@ -19,7 +19,12 @@ import { join, resolve, sep, delimiter as pathDelimiter } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync, statSync, unlinkSync } from 'node:fs'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+
+/** 本地 JsonValue（标准 JSON 值递归类型）：dsh-tools 0.1.2-alpha 起移除了该
+ * 类型导出（schema 类型体系重命名）——不再耦合宿主易变类型导出，宿主版本
+ * 漂移免疫。与 dsh-tools 内部 JsonValue 结构相同，TS 结构化兼容。 */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LRUCache, Semaphore } from './concurrency.js'
 import type { PythonBridge } from './bridge.js'
 import type { VerifierStore } from './persist.js'
@@ -1250,6 +1255,24 @@ export function createEscalationRunner(deps: EscalationDeps) {
     // 对齐为 'progress'（decompose/evaluate_session 仍用 'track' 近似）。
     if (method === 'track' || method === 'decompose' || method === 'evaluate_session') await costGuard(deps, 'track')
     if (method === 'progress_update') await costGuard(deps, 'progress')
+    // F6（2026-08-29 公平审计，deepseek）：fall-through 的异步评分此前不落
+    // history——18 个写点全在同步路径，异步评分在成本审计不可见、'track'/
+    // 'progress' 桶缺异步时长样本（costGuard 估算系统性偏小）。clamp 后记录。
+    const ftStarted = Date.now()
+    const ftKind = method === 'progress_update' ? 'progress' : 'track'
+    const ftRecord = (result: Record<string, unknown>): void => {
+      const scores = Array.isArray(result.scores)
+        ? (result.scores as unknown[]).filter((v) => typeof v === 'number')
+        : typeof result.score === 'number' ? [result.score] : []
+      deps.store.appendHistory({
+        ts: new Date().toISOString(),
+        kind: ftKind,
+        ...(typeof fallThroughParams.problem === 'string' ? { problem: fallThroughParams.problem } : {}),
+        ...(typeof fallThroughParams.step === 'string' ? { step: fallThroughParams.step } : {}),
+        scores,
+        duration_ms: Date.now() - ftStarted,
+      })
+    }
     const raw = await gatedRequest<Record<string, unknown>>(deps, method, fallThroughParams)
     // D-4: track/progress results are scores too — the async task path and
     // the service seam used to return them RAW (unclamped), letting
@@ -1265,6 +1288,7 @@ export function createEscalationRunner(deps: EscalationDeps) {
         out.warning = scoreWarning(`${method} raw: ${JSON.stringify(out.scores)}`, clamped.some((c) => c.missing))
       }
       out.scores = clamped.map((c) => c.value)
+      ftRecord(out)
       return out
     }
     if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).score !== undefined) {
@@ -1276,8 +1300,10 @@ export function createEscalationRunner(deps: EscalationDeps) {
         out.warning = scoreWarning(`${method} raw: ${String(out.score)}`, c.missing)
       }
       out.score = c.value
+      ftRecord(out)
       return out
     }
+    ftRecord(raw as Record<string, unknown>)
     return raw
   }
 }

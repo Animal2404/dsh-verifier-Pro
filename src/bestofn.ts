@@ -108,6 +108,22 @@ function runEvidenceChain(
       for (const t of tmpFiles) { try { rmSync(t, { force: true }) } catch { /* best-effort */ } }
       finish({ code: timedOut ? 124 : (code ?? 1), stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + timedOutNote })
     })
+    // F5（2026-08-29 公平审计，deepseek·平台限定 REPORTED）：POSIX 下孙进程持
+    // stdio 写端时 'close' 可能永不触发（SIGKILL 杀掉 evidence_chain 后其拉起的
+    // 候选/浏览器进程继承管道）→ promise 永挂、tmpFiles 泄漏、/bestofn 卡死。
+    // 'exit' 在进程终止时必然触发：延迟 5s 作兜底 finish（给 stdio 排空机会；
+    // close 先到则 settled 挡住）。Windows libuv 在直接子进程终止时即关闭管道，
+    // 本平台不受影响——此为防御性兜底。
+    child.on('exit', (code) => {
+      const fallback = setTimeout(() => {
+        for (const t of tmpFiles) { try { rmSync(t, { force: true }) } catch { /* best-effort */ } }
+        finish({
+          code: timedOut ? 124 : (code ?? 1),
+          stdout: stdout + (stderr ? `\n[stderr] ${stderr}` : '') + '\n[evidence_chain exit fallback: stdio close never arrived — orphan grandchildren holding pipes?]',
+        })
+      }, 5_000)
+      fallback.unref()
+    })
     child.on('error', (e) => {
       for (const t of tmpFiles) { try { rmSync(t, { force: true }) } catch { /* best-effort */ } }
       finish({ code: 1, stdout: `evidence_chain spawn error: ${e.message}` })

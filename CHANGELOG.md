@@ -77,6 +77,14 @@
 - **audit_checks 扩展至 28 项**：F2 criteria 净化覆盖、F1 数组拒绝收口、F7 真集成断言
 - **AUDIT 轨协议 A10（工具地板 + 保真度）**：审计先跑 audit_checks（确定性地板，不计审计者功劳）+ mutation_check（假测试即发现）；严重性定级必须在 verifier compare 产出非 flat margin 之后才成立
 
+### Fixed（2026-08-29 第三轮补漏：第一轮合并清单遗漏项 + 宿主漂移免疫）
+
+> 发布后自查发现第一轮公平审计（deepseek）的 F5/F6 未进入修复清单（合并遗漏），补修；另修复宿主包漂移（全局 dsh 升级 0.1.2-alpha.2）导致的类型破坏。
+
+- **F5（P3·REPORTED，平台限定）**：`runEvidenceChain` 只监听 `close`——POSIX 下孙进程持 stdio 写端时 close 永不触发 → promise 永挂、tmpFiles 泄漏、/bestofn 卡死 → 加 `exit` 兜底 finish（延迟 5s 给 stdio 排空；Windows libuv 不受影响，防御性修复，平台限定）
+- **F6（P3）**：runner fall-through 的异步评分**不落 history**——18 个写点全在同步路径，异步评分在成本审计不可见、'track'/'progress' 桶缺异步时长样本（costGuard 估算系统性偏小）→ fall-through 各分支补 `appendHistory`（kind 映射 track/progress + duration_ms）+ 2 个断言测试 + mutation 对（11 对全真）
+- **宿主漂移免疫**：全局 dsh 升级 0.1.2-alpha.2 后 `dsh-tools` 移除 `JsonValue` 类型导出 → 本地 typecheck/build 破坏。tools.ts 改为本地定义标准 JSON 值递归类型（结构化兼容），**不再耦合宿主易变类型导出**——此类漂移（junction 目标 = 全局 dsh 依赖）今后只影响宿主自身演进面
+
 ### Fixed（2026-08-29 第二轮同题审计修复批：原版 PROA + 改版 DSHR2X 合并 14 项）
 
 > 背景：第二轮公平对比（统一提示词 + 工具协议）——两版均执行审计/变异/判别纪律，改版 6 头部 vs 原版 3 头部，但**原版的 N1 是全场最重安全项**。按「原版能找出的改版也能找出」原则，两版全部发现合并修复，且每项修复都登记进 mutation_check 变异清单（10 对全真）。

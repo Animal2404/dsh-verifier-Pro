@@ -269,6 +269,31 @@ test('N4: compare degraded 分支带 duration_ms（A4 漏补分支）', async ()
   assert.equal(typeof out.duration_ms, 'number', 'degraded 必须带 duration_ms')
 })
 
+test('F6: runner fall-through track 落 history（异步成本审计不再缺数）', async () => {
+  const store = memoryStore()
+  const bridge = fakeBridge([{ scores: [0.7, 0.6] }])
+  const run = createEscalationRunner({ ...baseDeps(bridge, {}), store })
+  await run('track', { problem: 'p-f6', steps: ['s1', 's2'] })
+  const history = store.readHistory(10)
+  assert.equal(history.length, 1, '异步 track 必须落 history')
+  assert.equal(history[0].kind, 'track')
+  assert.equal(typeof history[0].duration_ms, 'number', '带 duration_ms')
+  assert.deepEqual(history[0].scores, [0.7, 0.6])
+  assert.equal(history[0].problem, 'p-f6')
+})
+
+test('F6: runner progress_update 落 history（kind=progress，充实 costGuard 桶）', async () => {
+  const store = memoryStore()
+  const bridge = fakeBridge([{ score: 0.6 }])
+  const run = createEscalationRunner({ ...baseDeps(bridge, {}), store })
+  await run('progress_update', { tracker_id: 't1', step: 's1' })
+  const history = store.readHistory(10)
+  assert.equal(history.length, 1)
+  assert.equal(history[0].kind, 'progress')
+  assert.deepEqual(history[0].scores, [0.6])
+  assert.equal(history[0].step, 's1')
+})
+
 test('N1(改版): runner progress_update null 分走缺失归因（typeof 短路修复）', async () => {
   const bridge = fakeBridge([{ score: null }]) // 桥侧评分失败洗成 null
   const run = createEscalationRunner(baseDeps(bridge, {}))

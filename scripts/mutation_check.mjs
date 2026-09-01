@@ -104,6 +104,13 @@ const MUTATIONS = [
     platform: 'win32',
     note: 'norm 仅 win32 生效；非 win32 环境记 SKIPPED',
   },
+  {
+    name: 'F6 fall-through history kind 映射（异步成本审计）',
+    file: 'lib/tools.js',
+    find: "const ftKind = method === 'progress_update' ? 'progress' : 'track';",
+    replace: "const ftKind = 'progress';",
+    test: [NODE, '--test', 'tests/f1-escalation.test.mjs'],
+  },
 ]
 
 const only = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : null
