@@ -12,6 +12,7 @@
 - **F6（P3）**：runner fall-through 的异步评分**不落 history**——18 个写点全在同步路径，异步评分在成本审计不可见、'track'/'progress' 桶缺异步时长样本（costGuard 估算系统性偏小）→ fall-through 各分支补 `appendHistory`（kind 映射 track/progress + duration_ms）+ 2 个断言测试 + mutation 对（11 对全真）
 - **宿主漂移免疫**：全局 dsh 升级 0.1.2-alpha.2 后 `dsh-tools` 移除 `JsonValue` 类型导出 → 本地 typecheck/build 破坏。tools.ts 改为本地定义标准 JSON 值递归类型（结构化兼容），**不再耦合宿主易变类型导出**——此类漂移（junction 目标 = 全局 dsh 依赖）今后只影响宿主自身演进面
 - **mutation_check 扩展至 11 对**：新登记 F6 history kind 映射变异对
+- **/bestofn 提示词优化（Verifier 评审驱动）**：7 个候选优化方案经 verifier select（deep_review，K=3 升级 top1 一致）排名后落地 6 项——① B6 加 **MERGE AUDIT MATRIX**（合并前列发现并集逐项处置，防 F5/F6 类合并遗漏再发）；② buildBestOfNActivation 改**单一事实源引用式**（此前复述协议遗漏 B2 PLAN GATE——实战事故：队长直接跳实现）+ 补三条最常跳过硬规则；③ A6 credibility 减半操作化（引用造假者的 findings 进报告前必须 captain 二次核验）；④ A1 反污染黑名单补全（其他审计者报告/会话记录/工作区审计产物）；⑤ B1/A2 lens 池按交付类型扩展（代码/分析/写作/审计各 3）；⑥ activation 输出语言跟随用户 goal。compare 复核两次上游超时——冠军定级降为「未定级」，落地判断基于 select 排序 + 实战事故证据（人工理由已附）；G（protocol 压缩）被 Verifier 与人工一致否决
 
 ## [0.7.5] - 2026-08-28（双审计修复批：2026-08-27 原版 + 2026-08-28 改版报告）
 

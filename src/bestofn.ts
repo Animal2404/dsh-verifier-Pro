@@ -310,13 +310,14 @@ export function buildBestOfNActivation(goal: string, n: number, summaries?: Map<
     `Goal: ${goal}`,
     `Candidate count: ${n} (spawn exactly ${n} members, each delivering a COMPLETE independent implementation of the goal — never split the task into aspects per member).`,
     extrasLine,
-    'Run the full loop:',
-    '1. agent_teams: create team, add N members, assign each the SAME task (complete implementation).',
-    '2. Collect N artifacts (each member saves its deliverable to a path).',
-    '3. Evidence chain per artifact: `node "' + join(pluginRoot, 'scripts', 'evidence_chain.mjs') + '" <artifact> --summary <name>=<self-description>`. Crash candidates (smoke ok=false) are eliminated on the spot; a candidate with NO smoke record (unknown) is also excluded from ranking — never assume it survived.',
-    '4. Survivor evidence blocks -> verifier select (adaptive K handles close margins; flat results carry no ranking signal — confirm the top two with compare). If the confirming compare is also within the noise band, there is NO reliable champion: do not invent one, merge ALL survivors instead.',
-    '5. Integrate: hand ALL survivors + scores to an integrator agent to merge the best parts -> merge smoke -> verifier compare(merged, champion-or-nominal-best) gate.',
-    '6. Deliver the final result + the full score report (never fabricate or round away scores).',
+    // A（2026-08-29 第二轮 Verifier 评审冠军级改进）：激活指令不再复述协议步骤——
+    // 此前复述版本遗漏了 B2 PLAN GATE（实战事故：队长直接跳到实现，错误方向
+    // 浪费 N 倍成本）。单一事实源 = 系统提示词里的协议文本（B1-B6/A1-A10）；
+    // 这里只补三条实战中最常被跳过的硬规则 + 语言跟随。
+    'Run the FULL protocol (BUILD track B1–B6 / AUDIT track A1–A10) exactly as written in your instructions — single source of truth, no re-summarized shortcut.',
+    'Step-order reminder: B2 PLAN GATE is NOT skippable — collect each member\'s brief plan, verifier compare("deep_review") them, merge losing plans\' strengths, and dispatch THE MERGED PLAN as the shared spec BEFORE any implementation. Jumping straight to implementation wastes N× cost on a wrong direction.',
+    'Rules most often skipped (each has bitten a real run): crash/unknown candidates are eliminated on the spot; flat select → confirm top two with compare → still flat/unstable means NO champion, merge ALL survivors; MERGE AUDIT MATRIX before integrating (union of findings/components, each marked merged-in / dropped-with-reason / deferred); never fabricate or round away scores — deliver the full score report.',
+    'Report language: match the language of the user\'s goal above — all member instructions, intermediate summaries, and the final report use that language.',
   ].join('\n')
 }
 
